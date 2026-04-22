@@ -77,6 +77,7 @@ await connectToMongo();
 
 const io = new SocketIOServer(httpServer, {
   path: "/socket.io",
+  addTrailingSlash: false,
   cors: {
     origin: true,
     credentials: true,
@@ -163,6 +164,10 @@ onRealtimeEvent(REALTIME_EVENTS.ROOM_UPDATED, ({ room }) => {
   io.to(`room:${room.id}`).emit("room:updated", room);
 });
 
+onRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, ({ roomId }) => {
+  io.to(`room:${roomId}`).emit("room:closed", { roomId });
+});
+
 onRealtimeEvent(REALTIME_EVENTS.PUBLIC_ROOMS_UPDATED, ({ rooms }) => {
   io.emit("rooms:public", rooms);
 });
@@ -172,6 +177,9 @@ onRealtimeEvent(REALTIME_EVENTS.INVITATION_CREATED, ({ roomId, invitation }) => 
 });
 
 httpServer.on("request", (req, res) => {
+  if (req.url?.startsWith("/socket.io")) {
+    return;
+  }
   handle(req, res);
 });
 

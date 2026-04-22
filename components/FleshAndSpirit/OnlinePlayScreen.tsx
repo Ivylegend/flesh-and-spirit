@@ -358,6 +358,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
 
     const socket = io({
       path: "/socket.io",
+      addTrailingSlash: false,
       withCredentials: true,
     });
 
@@ -386,6 +387,15 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
       reportSocketActivity(`Room "${room.name}" updated live.`);
     });
 
+    socket.on("room:closed", ({ roomId }: { roomId: string }) => {
+      startTransition(() => {
+        setActiveRoomId((current) => (current === roomId ? null : current));
+        setLiveRoom((current) => (current?.id === roomId ? null : current));
+      });
+      reportSocketActivity("The active room was closed.");
+      void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+    });
+
     socket.on("rooms:public", (rooms: RoomSummary[]) => {
       updatePublicRoomsFromSocket(rooms);
     });
@@ -398,7 +408,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [user]);
+  }, [queryClient, user]);
 
   useEffect(() => {
     if (!socketRef.current || !activeRoomId || socketState !== "connected") {

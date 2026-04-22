@@ -270,7 +270,51 @@ export async function clearSession(sessionId: string | null | undefined) {
   }
 
   await connectToDatabase();
-  await SessionModel.deleteOne({ token: sessionId });
+  const session = await SessionModel.findOne({ token: sessionId }).lean();
+
+  if (!session) {
+    return;
+  }
+
+  await SessionModel.deleteMany({ userId: session.userId });
+  const user = await UserModel.findById(session.userId).lean<UserDocument | null>();
+
+  if (!user || user.role !== "guest") {
+    return;
+  }
+
+  const affectedRooms = await RoomModel.find({
+    "members.userId": user._id,
+  });
+
+  const roomUpdates = affectedRooms.map(async (room) => {
+    room.members = room.members.filter((member) => member.userId !== user._id);
+
+    if (room.ownerId === user._id) {
+      const nextOwner = room.members[0];
+      if (nextOwner) {
+        room.ownerId = nextOwner.userId;
+      }
+    }
+
+    if (room.members.length === 0) {
+      await RoomModel.deleteOne({ _id: room._id });
+      emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, {
+        roomId: room._id,
+      });
+      return;
+    }
+
+    await room.save();
+    await publishRoomChange(room._id);
+  });
+
+  await Promise.all(roomUpdates);
+  await InvitationModel.deleteMany({
+    $or: [{ createdByUserId: user._id }, { inviteeUserId: user._id }],
+  });
+  await UserModel.deleteOne({ _id: user._id });
+  await publishPublicRoomsChange();
 }
 
 async function requireRoom(roomId: string) {
