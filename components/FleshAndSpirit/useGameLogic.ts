@@ -6,7 +6,6 @@ import { useState, useCallback, useRef } from "react";
 import {
   Player,
   GameState,
-  GameEvent,
   HolySpiritCard,
   TokenColor,
   TOTAL_TILES,

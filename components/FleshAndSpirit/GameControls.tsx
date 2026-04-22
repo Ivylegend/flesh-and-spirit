@@ -23,21 +23,22 @@ const DICE_DOTS: Record<number, [number, number][]> = {
 
 function DiceFace({ value, rolling }: { value: number | null; rolling: boolean }) {
   // While rolling, cycle through random faces rapidly
-  const [displayVal, setDisplayVal] = useState<number>(1);
+  const [rollingValue, setRollingValue] = useState<number>(1);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (rolling) {
       intervalRef.current = setInterval(() => {
-        setDisplayVal(Math.floor(Math.random() * 6) + 1);
+        setRollingValue(Math.floor(Math.random() * 6) + 1);
       }, 80);
     } else {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      if (value) setDisplayVal(value);
+      intervalRef.current = null;
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [rolling, value]);
 
+  const displayVal = rolling ? rollingValue : (value ?? 1);
   const dots = DICE_DOTS[displayVal] ?? [];
 
   return (

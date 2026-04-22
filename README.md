@@ -1,29 +1,46 @@
-# Icha house of games
+# Flesh & Spirit
 
-Its a combination of multiple gospel based board games. All the distinct board games can be found in the components directory.
+Flesh & Spirit is a gospel-themed multiplayer board game built with Next.js.
+It now supports both:
 
-## Technologies Used
+- local play on one device
+- online play with accounts or guests, public/private rooms, invite links, MongoDB persistence, and live lobby updates over WebSockets
 
-- Vite
+## Stack
+
+- Next.js 16 App Router
+- React 19
 - TypeScript
-- React
-- shadcn-ui
 - Tailwind CSS
+- MongoDB with Mongoose
+- Socket.IO
+- React Query
 
-## Getting Started
+## Environment
+
+Create a `.env.local` file:
 
 ```sh
-# Install dependencies
-npm i
-
-# Start the development server
-npm run dev
+MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_DB=flesh_spirit
 ```
 
-more prompts for claude, so when a user finishes the game, they should have an option to continue or end the game, choosing continue would continue with the remaining number of players and so on, until only one player is left
+You can also copy values from [.env.example](/Users/mac/Desktop/flesh-spirit/.env.example).
 
-add lines/thunderbolts from each sin to the linking one
+## Run
 
-add online game play which means users can play the game online with each other, this would require adding a backend and a database, and also a way to host the game online
+```sh
+pnpm install
+pnpm dev
+```
 
-lastly, work on other games too
+The app now runs through a custom Node server in [server.mjs](/Users/mac/Desktop/flesh-spirit/server.mjs) so Next.js and Socket.IO share the same process.
+
+## Features
+
+- choose `Local Play` or `Online Play` from the home screen
+- sign up, sign in, or continue as a guest
+- create public or private rooms
+- join public rooms
+- invite by username or shareable link
+- live lobby room updates through WebSockets

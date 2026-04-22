@@ -3,10 +3,7 @@
 
 import {
   LAYOUT,
-  TOTAL_TILES,
-  START_TILE,
   SIN_TILES,
-  HOLY_SPIRIT_TILES,
   TOKEN_COLORS,
   Player,
   getTileType,
