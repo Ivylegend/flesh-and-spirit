@@ -33,6 +33,12 @@ export interface ExtendedGameState extends GameState {
   animatingToken: AnimatingToken | null;
 }
 
+interface PersistedGameSnapshot {
+  state: ExtendedGameState;
+  deck: HolySpiritCard[];
+  discard: HolySpiritCard[];
+}
+
 const makeInitialState = (): ExtendedGameState => ({
   phase: "setup",
   players: [],
@@ -44,13 +50,51 @@ const makeInitialState = (): ExtendedGameState => ({
   animatingToken: null,
 });
 
+function readStoredSnapshot(storageKey?: string | null) {
+  if (!storageKey || typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return null;
+    }
+
+    return JSON.parse(raw) as PersistedGameSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useGameLogic() {
-  const [state, setState] = useState<ExtendedGameState>(makeInitialState());
-  const deckRef = useRef<HolySpiritCard[]>([]);
-  const discardRef = useRef<HolySpiritCard[]>([]);
+export function useGameLogic(options?: { storageKey?: string }) {
+  const storageKey = options?.storageKey;
+  const storedSnapshot = readStoredSnapshot(storageKey);
+  const [state, setState] = useState<ExtendedGameState>(
+    storedSnapshot?.state ?? makeInitialState(),
+  );
+  const deckRef = useRef<HolySpiritCard[]>(storedSnapshot?.deck ?? []);
+  const discardRef = useRef<HolySpiritCard[]>(storedSnapshot?.discard ?? []);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  const persistSnapshot = useCallback(
+    (nextState: ExtendedGameState) => {
+      if (!storageKey || typeof window === "undefined") {
+        return;
+      }
+
+      const snapshot: PersistedGameSnapshot = {
+        state: nextState,
+        deck: deckRef.current,
+        discard: discardRef.current,
+      };
+
+      window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+    },
+    [storageKey],
+  );
 
   const clearTimers = () => {
     timersRef.current.forEach(clearTimeout);
@@ -84,22 +128,30 @@ export function useGameLogic() {
       // Show the token at each tile along the path, one at a time
       path.forEach((tile, idx) => {
         const t = setTimeout(() => {
-          setState((prev) => ({
-            ...prev,
-            animatingToken: { playerId, visibleTile: tile },
-          }));
+          setState((prev) => {
+            const nextState = {
+              ...prev,
+              animatingToken: { playerId, visibleTile: tile },
+            };
+            persistSnapshot(nextState);
+            return nextState;
+          });
         }, idx * stepMs);
         timersRef.current.push(t);
       });
 
       // After all steps, fire onComplete and clear animation
       const done = setTimeout(() => {
-        setState((prev) => ({ ...prev, animatingToken: null }));
+        setState((prev) => {
+          const nextState = { ...prev, animatingToken: null };
+          persistSnapshot(nextState);
+          return nextState;
+        });
         onComplete(path[path.length - 1]);
       }, path.length * stepMs);
       timersRef.current.push(done);
     },
-    [],
+    [persistSnapshot],
   );
 
   // ── Core landing resolver — decides what happens when a player reaches a tile
@@ -112,7 +164,7 @@ export function useGameLogic() {
 
         // WIN
         if (tile === TOTAL_TILES) {
-          return {
+          const nextState = {
             ...prev,
             players: prev.players.map((p) =>
               p.id === playerId ? { ...p, position: tile, hasWon: true } : p,
@@ -125,11 +177,13 @@ export function useGameLogic() {
               message: `🎉 ${player.name} reached the Crown and won the game!`,
             },
           };
+          persistSnapshot(nextState);
+          return nextState;
         }
 
         // HOLY SPIRIT TILE — stay on this player's turn, open card picker
         if (HOLY_SPIRIT_TILES.has(tile)) {
-          return {
+          const nextState = {
             ...prev,
             players: prev.players.map((p) =>
               p.id === playerId ? { ...p, position: tile } : p,
@@ -143,6 +197,8 @@ export function useGameLogic() {
               message: `✨ ${player.name} landed on a Holy Spirit tile! Choose a card.`,
             },
           };
+          persistSnapshot(nextState);
+          return nextState;
         }
 
         // SIN TILE
@@ -162,7 +218,7 @@ export function useGameLogic() {
                   (p) => p.id === playerId,
                 );
                 if (!innerPlayer) return inner;
-                return {
+                const nextState = {
                   ...inner,
                   players: inner.players.map((p) =>
                     p.id === playerId ? { ...p, position: endTile } : p,
@@ -182,12 +238,14 @@ export function useGameLogic() {
                         : `💥 ${innerPlayer.name} landed on ${sin.name}! Sent back to tile ${endTile}.`,
                   },
                 };
+                persistSnapshot(nextState);
+                return nextState;
               });
             });
           }, 100);
 
           // Immediately show player at the sin tile before animation
-          return {
+          const nextState = {
             ...prev,
             players: prev.players.map((p) =>
               p.id === playerId ? { ...p, position: tile } : p,
@@ -202,10 +260,12 @@ export function useGameLogic() {
               message: `💥 ${player.name} landed on ${sin.name}...`,
             },
           };
+          persistSnapshot(nextState);
+          return nextState;
         }
 
         // NORMAL TILE
-        return {
+        const nextState = {
           ...prev,
           players: prev.players.map((p) =>
             p.id === playerId ? { ...p, position: tile } : p,
@@ -221,9 +281,11 @@ export function useGameLogic() {
             message: `${player.name} moved to tile ${tile}.`,
           },
         };
+        persistSnapshot(nextState);
+        return nextState;
       });
     },
-    [animateAlongPath],
+    [animateAlongPath, persistSnapshot],
   );
 
   // ── Add / remove players ──────────────────────────────────────────────────
@@ -234,7 +296,7 @@ export function useGameLogic() {
         prev.players.some((p) => p.color === color)
       )
         return prev;
-      return {
+      const nextState = {
         ...prev,
         players: [
           ...prev.players,
@@ -248,15 +310,21 @@ export function useGameLogic() {
           },
         ],
       };
+      persistSnapshot(nextState);
+      return nextState;
     });
-  }, []);
+  }, [persistSnapshot]);
 
   const removePlayer = useCallback((playerId: string) => {
-    setState((prev) => ({
-      ...prev,
-      players: prev.players.filter((p) => p.id !== playerId),
-    }));
-  }, []);
+    setState((prev) => {
+      const nextState = {
+        ...prev,
+        players: prev.players.filter((p) => p.id !== playerId),
+      };
+      persistSnapshot(nextState);
+      return nextState;
+    });
+  }, [persistSnapshot]);
 
   // ── Start game ────────────────────────────────────────────────────────────
   const startGame = useCallback(() => {
@@ -264,7 +332,7 @@ export function useGameLogic() {
       if (prev.players.length < 2) return prev;
       deckRef.current = createDeck();
       discardRef.current = [];
-      return {
+      const nextState = {
         ...prev,
         phase: "playing" as const,
         players: prev.players.map((p) => ({
@@ -279,8 +347,10 @@ export function useGameLogic() {
         pendingHolySpiritChoice: false,
         animatingToken: null,
       };
+      persistSnapshot(nextState);
+      return nextState;
     });
-  }, [dealCards]);
+  }, [dealCards, persistSnapshot]);
 
   // ── Roll dice ─────────────────────────────────────────────────────────────
   const rollDice = useCallback(() => {
@@ -292,7 +362,9 @@ export function useGameLogic() {
         prev.animatingToken
       )
         return prev;
-      return { ...prev, isRolling: true };
+      const nextState = { ...prev, isRolling: true };
+      persistSnapshot(nextState);
+      return nextState;
     });
 
     // Dice roll delay (gives time for the visual dice spin)
@@ -307,7 +379,7 @@ export function useGameLogic() {
 
         // OVERSHOOT — ends turn immediately, no re-roll
         if (newPosition > TOTAL_TILES) {
-          return {
+          const nextState = {
             ...prev,
             isRolling: false,
             diceValue: rolled,
@@ -322,6 +394,8 @@ export function useGameLogic() {
             currentPlayerIndex:
               (prev.currentPlayerIndex + 1) % prev.players.length,
           };
+          persistSnapshot(nextState);
+          return nextState;
         }
 
         // Normal roll — start bounce animation
@@ -340,11 +414,13 @@ export function useGameLogic() {
           });
         }, 0);
 
-        return { ...prev, isRolling: false, diceValue: rolled };
+        const nextState = { ...prev, isRolling: false, diceValue: rolled };
+        persistSnapshot(nextState);
+        return nextState;
       });
     }, 700);
     timersRef.current.push(t);
-  }, [animateAlongPath, resolveLanding]);
+  }, [animateAlongPath, persistSnapshot, resolveLanding]);
 
   // ── Use Holy Spirit card ──────────────────────────────────────────────────
   const useCard = useCallback(
@@ -371,7 +447,7 @@ export function useGameLogic() {
           .filter((c) => c.id !== cardId)
           .concat(newCard ? [newCard] : []);
 
-        return {
+        const nextState = {
           ...prev,
           pendingHolySpiritChoice: false,
           players: prev.players.map((p) =>
@@ -386,6 +462,8 @@ export function useGameLogic() {
             message: `✨ ${player.name} used "${card.attribute}" (+${card.steps} steps)`,
           },
         };
+        persistSnapshot(nextState);
+        return nextState;
       });
 
       // Animate after state settles
@@ -398,7 +476,7 @@ export function useGameLogic() {
         });
       }, 50);
     },
-    [dealCards, animateAlongPath, resolveLanding],
+    [dealCards, animateAlongPath, persistSnapshot, resolveLanding],
   );
 
   // ── Reset ─────────────────────────────────────────────────────────────────
@@ -406,8 +484,10 @@ export function useGameLogic() {
     clearTimers();
     deckRef.current = [];
     discardRef.current = [];
-    setState(makeInitialState());
-  }, []);
+    const nextState = makeInitialState();
+    setState(nextState);
+    persistSnapshot(nextState);
+  }, [persistSnapshot]);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const currentPlayer = state.players[state.currentPlayerIndex] ?? null;

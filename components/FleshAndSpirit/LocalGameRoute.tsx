@@ -1,66 +1,44 @@
 "use client";
 
-import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 import GameBoard from "@/components/FleshAndSpirit/GameBoard";
 import GameControls from "@/components/FleshAndSpirit/GameControls";
-import ModeSelectScreen from "@/components/FleshAndSpirit/ModeSelectScreen";
-import OnlinePlayScreen from "@/components/FleshAndSpirit/OnlinePlayScreen";
-import SetupScreen from "@/components/FleshAndSpirit/SetupScreen";
+import { Button } from "@/components/ui/button";
 import { useGameLogic } from "@/components/FleshAndSpirit/useGameLogic";
 
-type HomeView = "landing" | "local" | "online";
+const LOCAL_STORAGE_KEY = "flesh-spirit-local-game";
 
-export default function HomeShell() {
-  const searchParams = useSearchParams();
-  const [view, setView] = useState<HomeView>("landing");
+export default function LocalGameRoute() {
+  const router = useRouter();
   const {
     state,
     currentPlayer,
-    availableColors,
-    addPlayer,
-    removePlayer,
-    startGame,
     rollDice,
     useCard,
     resetGame,
     getDisplayPosition,
-  } = useGameLogic();
-
-  const forcedOnline = searchParams.get("mode") === "online";
-  const activeView = view === "landing" && forcedOnline ? "online" : view;
-
-  const goHome = () => {
-    if (typeof window !== "undefined") {
-      window.history.replaceState({}, "", "/");
-    }
-    setView("landing");
-  };
-
-  if (activeView === "landing") {
-    return (
-      <ModeSelectScreen
-        onSelectLocal={() => setView("local")}
-        onSelectOnline={() => setView("online")}
-      />
-    );
-  }
-
-  if (activeView === "online") {
-    return <OnlinePlayScreen onBack={goHome} />;
-  }
+  } = useGameLogic({ storageKey: LOCAL_STORAGE_KEY });
 
   if (state.phase === "setup") {
     return (
-      <SetupScreen
-        players={state.players}
-        availableColors={availableColors}
-        onAddPlayer={addPlayer}
-        onRemovePlayer={removePlayer}
-        onStartGame={startGame}
-        onBack={goHome}
-      />
+      <div className="min-h-screen bg-amber-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-3xl border border-amber-100 bg-white p-6 shadow-sm space-y-4 text-center">
+          <h1 className="text-2xl font-bold text-amber-800">No local game started</h1>
+          <p className="text-sm text-amber-700">
+            Set up players first to begin a local match.
+          </p>
+          <div className="flex gap-3">
+            <Button asChild className="flex-1 bg-amber-800 text-amber-50 hover:bg-amber-900">
+              <Link href="/local">Go To Setup</Link>
+            </Button>
+            <Button asChild variant="outline" className="flex-1">
+              <Link href="/">Home</Link>
+            </Button>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -70,7 +48,7 @@ export default function HomeShell() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={goHome}
+            onClick={() => router.push("/")}
             className="rounded-full border border-amber-200 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-amber-800 transition hover:bg-amber-100"
           >
             Home
@@ -105,7 +83,10 @@ export default function HomeShell() {
               pendingHolySpiritChoice={state.pendingHolySpiritChoice}
               onRoll={rollDice}
               onUseCard={useCard}
-              onReset={resetGame}
+              onReset={() => {
+                resetGame();
+                router.push("/local");
+              }}
               gamePhase={state.phase as "playing" | "won" | "setup"}
             />
           </div>

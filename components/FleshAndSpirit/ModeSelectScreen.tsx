@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import { Globe2, Swords, Users } from "lucide-react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,8 +14,8 @@ import {
 } from "@/components/ui/card";
 
 interface ModeSelectScreenProps {
-  onSelectLocal: () => void;
-  onSelectOnline: () => void;
+  localHref: string;
+  onlineHref: string;
 }
 
 function PlayModeCard({
@@ -22,13 +23,13 @@ function PlayModeCard({
   description,
   eyebrow,
   icon,
-  onSelect,
+  href,
 }: {
   title: string;
   description: string;
   eyebrow: string;
   icon: ReactNode;
-  onSelect: () => void;
+  href: string;
 }) {
   return (
     <Card className="border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.45)] backdrop-blur">
@@ -60,10 +61,10 @@ function PlayModeCard({
           </div>
         </div>
         <Button
-          onClick={onSelect}
+          asChild
           className="h-11 w-full rounded-2xl bg-stone-900 text-amber-50 hover:bg-stone-800"
         >
-          Choose {title}
+          <Link href={href}>Choose {title}</Link>
         </Button>
       </CardContent>
     </Card>
@@ -71,8 +72,8 @@ function PlayModeCard({
 }
 
 export default function ModeSelectScreen({
-  onSelectLocal,
-  onSelectOnline,
+  localHref,
+  onlineHref,
 }: ModeSelectScreenProps) {
   return (
     <div className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(251,191,36,0.34),_transparent_32%),linear-gradient(180deg,_#fff8eb_0%,_#f6ead8_52%,_#efe1ce_100%)]">
@@ -97,14 +98,14 @@ export default function ModeSelectScreen({
             eyebrow="Around One Board"
             description="Set up players on this device and jump straight into the classic turn-based board flow you already have."
             icon={<Users className="size-5" />}
-            onSelect={onSelectLocal}
+            href={localHref}
           />
           <PlayModeCard
             title="Online Play"
             eyebrow="Rooms & Invites"
             description="Sign in or continue as a guest, create public or private rooms, and use live updates while friends join from anywhere."
             icon={<Globe2 className="size-5" />}
-            onSelect={onSelectOnline}
+            href={onlineHref}
           />
         </div>
       </div>

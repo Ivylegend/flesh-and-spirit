@@ -496,7 +496,7 @@ export async function acceptInvitation(input: {
 }
 
 export function createInviteAcceptanceUrl(origin: string, token: string) {
-  return `${origin}/?mode=online&invite=${token}`;
+  return `${origin}/online/invitations/${token}`;
 }
 
 export async function getUserFingerprint(identity: SessionUser) {

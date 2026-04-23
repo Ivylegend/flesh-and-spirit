@@ -24,7 +24,7 @@ import {
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -50,7 +50,9 @@ type AuthView = "signin" | "signup" | "guest";
 type SocketState = "idle" | "connecting" | "connected" | "error";
 
 interface OnlinePlayScreenProps {
-  onBack: () => void;
+  roomId?: string;
+  inviteToken?: string;
+  backHref?: string;
 }
 
 async function apiRequest<T>(
@@ -83,11 +85,8 @@ function getInviteToken(rawValue: string) {
   if (value.startsWith("http://") || value.startsWith("https://")) {
     try {
       const url = new URL(value);
-      return (
-        url.searchParams.get("invite") ||
-        url.pathname.split("/").filter(Boolean).at(-2) ||
-        ""
-      );
+      const segments = url.pathname.split("/").filter(Boolean);
+      return url.searchParams.get("invite") || segments.at(-1) || "";
     } catch {
       return value;
     }
@@ -116,11 +115,15 @@ function Eyelet({
   );
 }
 
-export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
+export default function OnlinePlayScreen({
+  roomId,
+  inviteToken,
+  backHref = "/",
+}: OnlinePlayScreenProps) {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const searchParams = useSearchParams();
   const socketRef = useRef<Socket | null>(null);
-  const handledInviteRef = useRef<string | null>(null);
+  const handledInviteRef = useRef<string | null>(inviteToken ?? null);
 
   const [authView, setAuthView] = useState<AuthView>("guest");
   const [displayName, setDisplayName] = useState("");
@@ -133,7 +136,6 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
   const [inviteUsername, setInviteUsername] = useState("");
   const [inviteInput, setInviteInput] = useState("");
   const [latestInviteUrl, setLatestInviteUrl] = useState("");
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [liveRoom, setLiveRoom] = useState<RoomSummary | null>(null);
   const [socketState, setSocketState] = useState<SocketState>("idle");
   const [roomSearch, setRoomSearch] = useState("");
@@ -142,7 +144,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
   ]);
 
   const deferredRoomSearch = useDeferredValue(roomSearch);
-  const inviteFromUrl = searchParams.get("invite") ?? "";
+  const currentRoomId = roomId ?? null;
 
   const sessionQuery = useQuery({
     queryKey: ["session"],
@@ -156,15 +158,15 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
   });
 
   const roomQuery = useQuery({
-    queryKey: ["room", activeRoomId],
-    queryFn: () => apiRequest<RoomResponse>(`/api/rooms/${activeRoomId}`),
-    enabled: Boolean(activeRoomId),
+    queryKey: ["room", currentRoomId],
+    queryFn: () => apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}`),
+    enabled: Boolean(currentRoomId),
     refetchOnWindowFocus: false,
   });
 
   const user = sessionQuery.data?.user ?? null;
   const activeRoom =
-    liveRoom && liveRoom.id === activeRoomId ? liveRoom : roomQuery.data?.room ?? null;
+    liveRoom && liveRoom.id === currentRoomId ? liveRoom : roomQuery.data?.room ?? null;
 
   const filteredRooms =
     publicRoomsQuery.data?.rooms.filter((room) => {
@@ -192,7 +194,6 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
   const updateRoomFromSocket = useEffectEvent((room: RoomSummary) => {
     startTransition(() => {
       setLiveRoom(room);
-      setActiveRoomId(room.id);
       queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
     });
   });
@@ -247,12 +248,14 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
         method: "DELETE",
       }),
     onSuccess: () => {
-      setActiveRoomId(null);
       setLiveRoom(null);
       setLatestInviteUrl("");
-      handledInviteRef.current = null;
+      handledInviteRef.current = inviteToken ?? null;
       setSocketState("idle");
       refreshSession();
+      if (currentRoomId || inviteToken) {
+        router.replace("/online");
+      }
       toast.success("Signed out.");
       appendActivity("Session closed.");
     },
@@ -271,11 +274,11 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
         }),
       }),
     onSuccess: ({ room }) => {
-      setActiveRoomId(room.id);
       setLiveRoom(room);
       setRoomName("");
       queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
       refreshSession();
+      router.push(`/online/rooms/${room.id}`);
       toast.success(`Created ${room.name}.`);
       appendActivity(`Room "${room.name}" opened as ${room.visibility}.`);
     },
@@ -290,10 +293,10 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
         method: "POST",
       }),
     onSuccess: ({ room }) => {
-      setActiveRoomId(room.id);
       setLiveRoom(room);
       queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
       refreshSession();
+      router.push(`/online/rooms/${room.id}`);
       toast.success(`Joined ${room.name}.`);
       appendActivity(`Joined room "${room.name}".`);
     },
@@ -311,16 +314,13 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
         },
       ),
     onSuccess: ({ room }) => {
-      setActiveRoomId(room.id);
       setLiveRoom(room);
       setInviteInput("");
       queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
       refreshSession();
+      router.replace(`/online/rooms/${room.id}`);
       toast.success(`Joined ${room.name} from invite.`);
       appendActivity(`Accepted an invite into "${room.name}".`);
-      if (typeof window !== "undefined") {
-        window.history.replaceState({}, "", "/?mode=online");
-      }
     },
     onError: (error) => {
       toast.error(
@@ -334,7 +334,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
       await apiRequest<InvitationResponse>("/api/invitations", {
         method: "POST",
         body: JSON.stringify({
-          roomId: activeRoomId,
+          roomId: currentRoomId,
           inviteeUsername: inviteUsername.trim() || undefined,
         }),
       }),
@@ -389,9 +389,11 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
 
     socket.on("room:closed", ({ roomId }: { roomId: string }) => {
       startTransition(() => {
-        setActiveRoomId((current) => (current === roomId ? null : current));
         setLiveRoom((current) => (current?.id === roomId ? null : current));
       });
+      if (currentRoomId === roomId) {
+        router.replace("/online");
+      }
       reportSocketActivity("The active room was closed.");
       void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
     });
@@ -408,14 +410,14 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [queryClient, user]);
+  }, [currentRoomId, inviteToken, queryClient, router, user]);
 
   useEffect(() => {
-    if (!socketRef.current || !activeRoomId || socketState !== "connected") {
+    if (!socketRef.current || !currentRoomId || socketState !== "connected") {
       return;
     }
 
-    socketRef.current.emit("room:watch", activeRoomId, (ack?: {
+    socketRef.current.emit("room:watch", currentRoomId, (ack?: {
       ok: boolean;
       error?: string;
     }) => {
@@ -425,18 +427,18 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
     });
 
     return () => {
-      socketRef.current?.emit("room:leave", activeRoomId);
+      socketRef.current?.emit("room:leave", currentRoomId);
     };
-  }, [activeRoomId, socketState]);
+  }, [currentRoomId, socketState]);
 
   useEffect(() => {
-    if (!user || !inviteFromUrl || handledInviteRef.current === inviteFromUrl) {
+    if (!user || !inviteToken || handledInviteRef.current === inviteToken) {
       return;
     }
 
-    handledInviteRef.current = inviteFromUrl;
-    acceptInviteMutation.mutate(inviteFromUrl);
-  }, [acceptInviteMutation, inviteFromUrl, user]);
+    handledInviteRef.current = inviteToken;
+    acceptInviteMutation.mutate(inviteToken);
+  }, [acceptInviteMutation, inviteToken, user]);
 
   async function copyInviteUrl() {
     if (!latestInviteUrl) {
@@ -467,10 +469,10 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
           <Button
             variant="outline"
             className="h-10 rounded-2xl border-stone-300 bg-white/80 px-4"
-            onClick={onBack}
+            onClick={() => router.push(backHref)}
           >
             <DoorOpen className="size-4" />
-            Back Home
+            {backHref === "/" ? "Back Home" : "Back"}
           </Button>
         </div>
 
@@ -637,7 +639,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
                           <Button
                             onClick={() =>
                               alreadyInside
-                                ? setActiveRoomId(room.id)
+                                ? router.push(`/online/rooms/${room.id}`)
                                 : joinRoomMutation.mutate(room.id)
                             }
                             disabled={!user || joinRoomMutation.isPending}
@@ -738,7 +740,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
                     <Link2 className="size-4" />
                     Accept invite
                   </Button>
-                  {inviteFromUrl && !user && (
+                  {inviteToken && !user && (
                     <p className="text-xs leading-5 text-amber-800">
                       An invite link is waiting. Sign in or continue as a guest
                       and it will be accepted automatically.
@@ -835,7 +837,7 @@ export default function OnlinePlayScreen({ onBack }: OnlinePlayScreenProps) {
                       />
                       <Button
                         onClick={() => createInviteMutation.mutate()}
-                        disabled={!activeRoomId || createInviteMutation.isPending}
+                        disabled={!currentRoomId || createInviteMutation.isPending}
                         className="h-11 rounded-2xl bg-stone-900 px-4 text-amber-50 hover:bg-stone-800"
                       >
                         <Link2 className="size-4" />

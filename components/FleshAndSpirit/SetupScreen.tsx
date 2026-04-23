@@ -2,6 +2,7 @@
 // SetupScreen.tsx
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   TokenColor,
   TOKEN_COLORS,
@@ -16,7 +17,7 @@ interface SetupScreenProps {
   onAddPlayer: (name: string, color: TokenColor) => void;
   onRemovePlayer: (id: string) => void;
   onStartGame: () => void;
-  onBack?: () => void;
+  onBackHref?: string;
 }
 
 export default function SetupScreen({
@@ -25,7 +26,7 @@ export default function SetupScreen({
   onAddPlayer,
   onRemovePlayer,
   onStartGame,
-  onBack,
+  onBackHref,
 }: SetupScreenProps) {
   const [name, setName] = useState("");
   const [selectedColor, setSelectedColor] = useState<TokenColor | null>(null);
@@ -42,15 +43,14 @@ export default function SetupScreen({
 
   return (
     <div className="min-h-screen bg-amber-50 flex flex-col items-center justify-center p-4">
-      {onBack && (
+      {onBackHref && (
         <div className="mb-6 w-full max-w-md">
-          <button
-            type="button"
-            onClick={onBack}
+          <Link
+            href={onBackHref}
             className="rounded-full border border-amber-200 bg-white px-4 py-2 text-sm font-medium text-amber-800 shadow-sm transition hover:border-amber-300 hover:bg-amber-100"
           >
             Change Mode
-          </button>
+          </Link>
         </div>
       )}
       <div className="text-center mb-8">
