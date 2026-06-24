@@ -151,6 +151,7 @@ export default function OnlinePlayScreen({
   const [liveRoom, setLiveRoom] = useState<RoomSummary | null>(null);
   const [socketState, setSocketState] = useState<SocketState>("idle");
   const [roomSearch, setRoomSearch] = useState("");
+  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
   const [activity, setActivity] = useState<string[]>([
     "Online lobby ready.",
   ]);
@@ -207,6 +208,8 @@ export default function OnlinePlayScreen({
         room.code.toLowerCase().includes(term)
       );
     }) ?? [];
+  const joinableRooms = filteredRooms.filter((room) => room.gameStatus === "lobby");
+  const spectateRooms = filteredRooms.filter((room) => room.gameStatus === "playing");
 
   const appendActivity = (message: string) => {
     startTransition(() => {
@@ -340,10 +343,12 @@ export default function OnlinePlayScreen({
   });
 
   const joinRoomMutation = useMutation({
-    mutationFn: async (roomId: string) =>
-      await apiRequest<RoomResponse>(`/api/rooms/${roomId}/join`, {
+    mutationFn: async (roomId: string) => {
+      setJoiningRoomId(roomId);
+      return await apiRequest<RoomResponse>(`/api/rooms/${roomId}/join`, {
         method: "POST",
-      }),
+      });
+    },
     onSuccess: ({ room }) => {
       setLiveRoom(room);
       queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
@@ -354,6 +359,9 @@ export default function OnlinePlayScreen({
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "Unable to join room.");
+    },
+    onSettled: () => {
+      setJoiningRoomId(null);
     },
   });
 
@@ -1200,15 +1208,22 @@ export default function OnlinePlayScreen({
                   className="h-11 rounded-2xl bg-white"
                 />
                 <div className="space-y-3">
-                  {filteredRooms.length === 0 && (
-                    <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
-                      No public rooms match this filter yet.
+                  {publicRoomsQuery.isLoading && (
+                    <div className="flex items-center gap-2 rounded-2xl border border-stone-200 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
+                      <RefreshCw className="size-4 animate-spin" />
+                      Loading rooms...
                     </div>
                   )}
-                  {filteredRooms.map((room) => {
+                  {!publicRoomsQuery.isLoading && joinableRooms.length === 0 && (
+                    <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
+                      No open lobbies match this filter yet.
+                    </div>
+                  )}
+                  {joinableRooms.map((room) => {
                     const alreadyInside = room.members.some(
                       (member) => member.userId === user?.id,
                     );
+                    const isJoiningThisRoom = joiningRoomId === room.id;
 
                     return (
                       <div
@@ -1236,7 +1251,7 @@ export default function OnlinePlayScreen({
                                 ? openRoom(room)
                                 : joinRoomMutation.mutate(room.id)
                             }
-                            disabled={!user || joinRoomMutation.isPending}
+                            disabled={!user || Boolean(joiningRoomId)}
                             className="h-10 rounded-2xl bg-stone-900 px-4 text-amber-50 hover:bg-stone-800"
                           >
                             {alreadyInside ? (
@@ -1244,7 +1259,7 @@ export default function OnlinePlayScreen({
                                 <Globe2 className="size-4" />
                                 Open Lobby
                               </>
-                            ) : joinRoomMutation.isPending ? (
+                            ) : isJoiningThisRoom ? (
                               <>
                                 <RefreshCw className="size-4 animate-spin" />
                                 Joining
@@ -1261,6 +1276,54 @@ export default function OnlinePlayScreen({
                     );
                   })}
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.42)]">
+              <CardHeader>
+                <CardTitle className="text-xl text-stone-900">
+                  Spectate Ongoing Games
+                </CardTitle>
+                <CardDescription>
+                  Watch public rooms whose games have already started.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {spectateRooms.length === 0 && (
+                  <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
+                    No ongoing public games match this filter.
+                  </div>
+                )}
+                {spectateRooms.map((room) => (
+                  <div
+                    key={room.id}
+                    className="rounded-3xl border border-stone-200 bg-stone-50/90 p-4"
+                  >
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-base font-semibold text-stone-900">
+                            {room.name}
+                          </h3>
+                          <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800">
+                            playing
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm text-stone-500">
+                          {room.memberCount} player
+                          {room.memberCount === 1 ? "" : "s"} in game
+                        </p>
+                      </div>
+                      <Button
+                        onClick={() => openRoom(room)}
+                        className="h-10 rounded-2xl bg-stone-900 px-4 text-amber-50 hover:bg-stone-800"
+                      >
+                        <Globe2 className="size-4" />
+                        Spectate
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </CardContent>
             </Card>
           </div>

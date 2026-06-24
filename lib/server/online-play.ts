@@ -466,6 +466,10 @@ export async function joinRoom(input: {
     throw new Error("This room is private. Use an invitation link.");
   }
 
+  if (room.gameStatus !== "lobby") {
+    throw new Error("This game has already started. You can spectate instead.");
+  }
+
   const alreadyMember = room.members.some((member) => member.userId === input.identity.id);
   if (!alreadyMember) {
     await ensureUserCanEnterRoom(input.identity, room._id);
