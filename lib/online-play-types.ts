@@ -50,7 +50,9 @@ export interface LeaderboardEntry {
   username: string;
   displayName: string;
   role: SessionUserRole;
+  gamesPlayed: number;
   wins: number;
+  losses: number;
   updatedAt: string;
 }
 

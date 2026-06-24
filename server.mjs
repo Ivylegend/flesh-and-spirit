@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import nextEnv from "@next/env";
 import mongoose from "mongoose";
@@ -16,6 +18,25 @@ const port = Number.parseInt(process.env.PORT || "3000", 10);
 const mongoUri = process.env.MONGODB_URI;
 const mongoDb = process.env.MONGODB_DB;
 const sessionCookieName = "flesh_spirit_session";
+
+if (dev) {
+  const requiredServerFiles = join(
+    process.cwd(),
+    ".next",
+    "required-server-files.json",
+  );
+  const devRequiredServerFiles = join(
+    process.cwd(),
+    ".next",
+    "dev",
+    "required-server-files.json",
+  );
+
+  if (existsSync(requiredServerFiles) && !existsSync(devRequiredServerFiles)) {
+    mkdirSync(dirname(devRequiredServerFiles), { recursive: true });
+    copyFileSync(requiredServerFiles, devRequiredServerFiles);
+  }
+}
 
 if (!mongoUri) {
   throw new Error("MONGODB_URI is not set.");
@@ -82,7 +103,6 @@ const app = next({
   hostname,
   port,
   httpServer,
-  webpack: dev,
 });
 const handle = app.getRequestHandler();
 

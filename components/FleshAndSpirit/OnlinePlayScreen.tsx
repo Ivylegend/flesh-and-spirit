@@ -44,6 +44,7 @@ import type {
   ApiResponse,
   AuthResponse,
   InvitationResponse,
+  LeaderboardEntry,
   PublicRoomsResponse,
   RoomResponse,
   RoomSummary,
@@ -156,6 +157,13 @@ export default function OnlinePlayScreen({
 
   const deferredRoomSearch = useDeferredValue(roomSearch);
   const currentRoomId = roomId ?? null;
+  const isRoomRoute = Boolean(currentRoomId);
+  const canSubmitAuth =
+    authView === "guest"
+      ? displayName.trim().length > 0
+      : username.trim().length > 0 &&
+        password.trim().length > 0 &&
+        (authView === "signin" || displayName.trim().length > 0);
 
   const sessionQuery = useQuery({
     queryKey: ["session"],
@@ -176,8 +184,16 @@ export default function OnlinePlayScreen({
   });
 
   const user = sessionQuery.data?.user ?? null;
+  const canCreateRoom = Boolean(user) && roomName.trim().length >= 3;
   const activeRoom =
     liveRoom && liveRoom.id === currentRoomId ? liveRoom : roomQuery.data?.room ?? null;
+
+  const myStatsQuery = useQuery({
+    queryKey: ["leaderboard", "me"],
+    queryFn: () =>
+      apiRequest<{ stats: LeaderboardEntry }>("/api/leaderboard/me"),
+    enabled: Boolean(user),
+  });
 
   const filteredRooms =
     publicRoomsQuery.data?.rooms.filter((room) => {
@@ -460,10 +476,57 @@ export default function OnlinePlayScreen({
     },
   });
 
+  const leaveRoomMutation = useMutation({
+    mutationFn: async () =>
+      await apiRequest<RoomResponse | { room: null }>(
+        `/api/rooms/${currentRoomId}/leave`,
+        { method: "POST" },
+      ),
+    onSuccess: (data) => {
+      if ("room" in data && data.room) {
+        cacheRoom(data.room);
+      } else {
+        setLiveRoom(null);
+      }
+      refreshSession();
+      router.replace("/online");
+      toast.success("You left the room.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to leave room.");
+    },
+  });
+
+  const closeRoomMutation = useMutation({
+    mutationFn: async () =>
+      await apiRequest<{ closed: boolean }>(`/api/rooms/${currentRoomId}/close`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      setLiveRoom(null);
+      refreshSession();
+      router.replace("/online");
+      toast.success("Room closed.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to close room.");
+    },
+  });
+
   useEffect(() => {
     if (!user) {
       socketRef.current?.disconnect();
       socketRef.current = null;
+      return;
+    }
+
+    const shouldUseSocket =
+      typeof window !== "undefined" &&
+      (window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1");
+
+    if (!shouldUseSocket) {
+      reportSocketActivity("Live updates are using refresh polling on this deployment.");
       return;
     }
 
@@ -522,6 +585,19 @@ export default function OnlinePlayScreen({
       socketRef.current = null;
     };
   }, [currentRoomId, inviteToken, queryClient, router, user]);
+
+  useEffect(() => {
+    if (!currentRoomId || socketState === "connected") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: ["room", currentRoomId] });
+      void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+    }, 2500);
+
+    return () => window.clearInterval(interval);
+  }, [currentRoomId, queryClient, socketState]);
 
   useEffect(() => {
     if (!socketRef.current || !currentRoomId || socketState !== "connected") {
@@ -590,6 +666,371 @@ export default function OnlinePlayScreen({
 
     await navigator.clipboard.writeText(latestInviteUrl);
     toast.success("Invite link copied.");
+  }
+
+  if (isRoomRoute) {
+    return (
+      <div className="min-h-screen bg-amber-50 text-stone-900">
+        <header className="sticky top-0 z-30 border-b border-amber-100 bg-white/95 px-3 py-3 backdrop-blur">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  className="h-9 rounded-xl border-amber-200 bg-white px-3"
+                  onClick={() => router.push("/online")}
+                >
+                  <DoorOpen className="size-4" />
+                  Rooms
+                </Button>
+                <div className="min-w-0">
+                  <h1 className="truncate text-base font-bold text-amber-900">
+                    {activeRoom?.name ?? "Opening room..."}
+                  </h1>
+                  <p className="text-xs text-stone-500">
+                    {activeRoom ? `${activeRoom.code} · ${activeRoom.gameStatus}` : "Loading"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${
+                  socketState === "connected"
+                    ? "bg-emerald-100 text-emerald-800"
+                    : socketState === "error"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-stone-100 text-stone-600"
+                }`}
+              >
+                {socketState === "connected" ? "Live" : "Polling"}
+              </span>
+              {isOwner && activeRoom && (
+                <Button
+                  variant="outline"
+                  className="h-9 rounded-xl border-red-200 bg-white px-3 text-red-700 hover:bg-red-50"
+                  onClick={() => closeRoomMutation.mutate()}
+                  disabled={closeRoomMutation.isPending}
+                >
+                  {closeRoomMutation.isPending ? (
+                    <RefreshCw className="size-4 animate-spin" />
+                  ) : (
+                    <DoorOpen className="size-4" />
+                  )}
+                  Close Room
+                </Button>
+              )}
+              {activeRoom && (
+                <Button
+                  variant="outline"
+                  className="h-9 rounded-xl border-stone-200 bg-white px-3"
+                  onClick={() => leaveRoomMutation.mutate()}
+                  disabled={leaveRoomMutation.isPending}
+                >
+                  {leaveRoomMutation.isPending ? (
+                    <RefreshCw className="size-4 animate-spin" />
+                  ) : (
+                    <LogOut className="size-4" />
+                  )}
+                  Leave
+                </Button>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {roomQuery.isLoading ? (
+          <div className="flex min-h-[calc(100dvh-64px)] items-center justify-center">
+            <div className="flex items-center gap-3 rounded-2xl border border-amber-100 bg-white px-4 py-3 text-sm text-stone-600">
+              <RefreshCw className="size-4 animate-spin" />
+              Loading room...
+            </div>
+          </div>
+        ) : roomQuery.isError ? (
+          <div className="flex min-h-[calc(100dvh-64px)] items-center justify-center p-4">
+            <div className="max-w-md rounded-3xl border border-red-100 bg-white p-6 text-center shadow-sm">
+              <h2 className="text-xl font-semibold text-red-700">
+                Unable to open this room
+              </h2>
+              <p className="mt-2 text-sm text-stone-600">
+                {roomQuery.error instanceof Error
+                  ? roomQuery.error.message
+                  : "The room may have been closed."}
+              </p>
+              <Button
+                className="mt-4 rounded-2xl bg-stone-900 text-amber-50"
+                onClick={() => router.replace("/online")}
+              >
+                Back to Online Rooms
+              </Button>
+            </div>
+          </div>
+        ) : activeRoom ? (
+          activeRoom.gameStatus === "playing" || activeRoom.gameStatus === "won" ? (
+            <main className="grid min-h-[calc(100dvh-64px)] grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_23rem] lg:grid-rows-1">
+              <section className="flex min-h-[55dvh] items-center justify-center overflow-hidden p-2 sm:p-3 lg:min-h-0">
+                <div className="h-full max-h-[calc(100dvh-88px)] w-full max-w-[min(100%,calc((100dvh-88px)*0.72))] sm:max-w-[min(100%,34rem)] lg:max-w-[min(100%,calc((100dvh-88px)*0.72))]">
+                  <GameBoard
+                    players={activePlayers}
+                    getDisplayPosition={getOnlineDisplayPosition}
+                    animatingToken={null}
+                    onTileClick={(tile) => {
+                      toast.info(`Tile ${tile}`);
+                    }}
+                  />
+                </div>
+              </section>
+              <aside className="border-t border-amber-100 bg-white p-3 lg:overflow-y-auto lg:border-l lg:border-t-0">
+                <GameControls
+                  players={activePlayers}
+                  currentPlayer={currentPlayer}
+                  diceValue={activeRoom.gameState?.diceValue ?? null}
+                  isRolling={
+                    activeRoom.gameState?.isRolling || rollDiceMutation.isPending
+                  }
+                  isAnimating={false}
+                  lastEvent={activeRoom.gameState?.lastEvent ?? null}
+                  pendingHolySpiritChoice={
+                    activeRoom.gameState?.pendingHolySpiritChoice ?? false
+                  }
+                  onRoll={() => rollDiceMutation.mutate()}
+                  onUseCard={(cardId) => useCardMutation.mutate(cardId)}
+                  onReset={() => router.push("/online")}
+                  gamePhase={activeRoom.gameState?.phase ?? "setup"}
+                  canRoll={isCurrentOnlinePlayer}
+                  canUseCards={isCurrentOnlinePlayer}
+                />
+              </aside>
+            </main>
+          ) : (
+            <main className="mx-auto grid w-full max-w-6xl gap-5 px-4 py-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
+              <section className="space-y-5">
+                <div className="rounded-3xl border border-white/70 bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-semibold text-stone-950">
+                        Choose Your Token
+                      </h2>
+                      <p className="text-sm text-stone-500">
+                        The game can start when at least two players have selected colors.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">
+                      {activeRoom.tokenSelections.length}/4 ready
+                    </span>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {ALL_COLORS.map((color) => {
+                      const selectedUserId = selectedUserByColor.get(color);
+                      const selectedMember = activeRoom.members.find(
+                        (member) => member.userId === selectedUserId,
+                      );
+                      const isMine = currentUserSelection === color;
+                      const token = TOKEN_COLORS[color];
+
+                      return (
+                        <button
+                          key={color}
+                          type="button"
+                          onClick={() => selectTokenMutation.mutate(color)}
+                          disabled={
+                            !user ||
+                            selectTokenMutation.isPending ||
+                            Boolean(selectedUserId && !isMine)
+                          }
+                          className={`flex min-h-20 items-center justify-between rounded-2xl border px-4 py-3 text-left transition ${
+                            isMine
+                              ? "border-stone-900 bg-white shadow-sm"
+                              : selectedUserId
+                                ? "border-stone-200 bg-stone-100 opacity-70"
+                                : "border-stone-200 bg-white hover:border-stone-400"
+                          }`}
+                        >
+                          <span className="flex items-center gap-3">
+                            <span className={`size-7 rounded-full border-2 ${token.bg} ${token.border}`} />
+                            <span>
+                              <span className="block text-sm font-semibold text-stone-900">
+                                {token.label}
+                              </span>
+                              <span className="text-xs text-stone-500">
+                                {selectedMember ? selectedMember.displayName : "Available"}
+                              </span>
+                            </span>
+                          </span>
+                          {isMine && (
+                            <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700">
+                              Yours
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-white/70 bg-white p-4 shadow-sm">
+                  <h2 className="mb-3 text-lg font-semibold text-stone-950">
+                    Players
+                  </h2>
+                  <div className="space-y-2">
+                    {activeRoom.members.map((member) => {
+                      const selectedColor = selectedColorByUser.get(member.userId);
+                      return (
+                        <div
+                          key={member.userId}
+                          className="flex items-center justify-between gap-3 rounded-2xl bg-stone-50 px-3 py-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-medium text-stone-900">
+                              {member.displayName}
+                            </div>
+                            <div className="text-xs text-stone-500">
+                              @{member.username}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {selectedColor && (
+                              <span className={`size-5 rounded-full border-2 ${TOKEN_COLORS[selectedColor].bg} ${TOKEN_COLORS[selectedColor].border}`} />
+                            )}
+                            {member.userId === activeRoom.ownerId && (
+                              <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-800">
+                                owner
+                              </span>
+                            )}
+                            {member.userId === activeRoom.umpireId && (
+                              <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-800">
+                                umpire
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              <aside className="space-y-4">
+                <div className="rounded-3xl border border-white/70 bg-white p-4 shadow-sm">
+                  <h2 className="text-lg font-semibold text-stone-950">
+                    Start Controls
+                  </h2>
+                  <p className="mt-1 text-sm text-stone-500">
+                    Owner or assigned umpire can start when enough players are ready.
+                  </p>
+                  {isOwner && (
+                    <select
+                      value={activeRoom.umpireId ?? ""}
+                      onChange={(event) =>
+                        assignUmpireMutation.mutate(event.target.value || null)
+                      }
+                      disabled={assignUmpireMutation.isPending}
+                      className="mt-4 h-11 w-full rounded-2xl border border-stone-200 bg-white px-3 text-sm text-stone-700 outline-none focus:border-stone-400"
+                    >
+                      <option value="">Owner starts the game</option>
+                      {activeRoom.members
+                        .filter((member) => member.userId !== activeRoom.ownerId)
+                        .map((member) => (
+                          <option key={member.userId} value={member.userId}>
+                            {member.displayName} can start as umpire
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                  <Button
+                    onClick={() => startGameMutation.mutate()}
+                    disabled={!canStartActiveRoom || startGameMutation.isPending}
+                    className="mt-4 h-11 w-full rounded-2xl bg-stone-900 text-amber-50 hover:bg-stone-800"
+                  >
+                    {startGameMutation.isPending ? (
+                      <RefreshCw className="size-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="size-4" />
+                    )}
+                    Start Game
+                  </Button>
+                </div>
+
+                <div className="rounded-3xl border border-white/70 bg-white p-4 shadow-sm">
+                  <h2 className="text-lg font-semibold text-stone-950">
+                    Invite
+                  </h2>
+                  <div className="mt-3 space-y-3">
+                    <Input
+                      value={inviteUsername}
+                      onChange={(event) => setInviteUsername(event.target.value)}
+                      placeholder="Optional username"
+                      className="h-11 rounded-2xl bg-white"
+                    />
+                    <Button
+                      onClick={() => createInviteMutation.mutate()}
+                      disabled={!currentRoomId || createInviteMutation.isPending}
+                      className="h-11 w-full rounded-2xl bg-stone-900 text-amber-50 hover:bg-stone-800"
+                    >
+                      {createInviteMutation.isPending ? (
+                        <RefreshCw className="size-4 animate-spin" />
+                      ) : (
+                        <Link2 className="size-4" />
+                      )}
+                      Create Invite
+                    </Button>
+                    {latestInviteUrl && (
+                      <Button
+                        variant="outline"
+                        className="h-11 w-full rounded-2xl bg-white"
+                        onClick={() => {
+                          void copyInviteUrl();
+                        }}
+                      >
+                        <Copy className="size-4" />
+                        Copy Invite
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {myStatsQuery.data?.stats && (
+                  <div className="rounded-3xl border border-white/70 bg-white p-4 shadow-sm">
+                    <h2 className="text-lg font-semibold text-stone-950">
+                      Your Stats
+                    </h2>
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                      <div className="rounded-2xl bg-stone-50 p-3">
+                        <div className="text-xl font-bold">{myStatsQuery.data.stats.gamesPlayed}</div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-stone-400">Played</div>
+                      </div>
+                      <div className="rounded-2xl bg-emerald-50 p-3">
+                        <div className="text-xl font-bold text-emerald-700">{myStatsQuery.data.stats.wins}</div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-emerald-500">Wins</div>
+                      </div>
+                      <div className="rounded-2xl bg-red-50 p-3">
+                        <div className="text-xl font-bold text-red-700">{myStatsQuery.data.stats.losses}</div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-red-500">Losses</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </aside>
+            </main>
+          )
+        ) : (
+          <div className="flex min-h-[calc(100dvh-64px)] items-center justify-center p-4">
+            <div className="max-w-md rounded-3xl border border-amber-100 bg-white p-6 text-center shadow-sm">
+              <h2 className="text-xl font-semibold text-stone-900">
+                Room not available
+              </h2>
+              <Button
+                className="mt-4 rounded-2xl bg-stone-900 text-amber-50"
+                onClick={() => router.replace("/online")}
+              >
+                Back to Online Rooms
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -723,7 +1164,7 @@ export default function OnlinePlayScreen({
                     </div>
                     <Button
                       onClick={() => authMutation.mutate(authView)}
-                      disabled={authMutation.isPending}
+                      disabled={!canSubmitAuth || authMutation.isPending}
                       className="h-11 w-full rounded-2xl bg-stone-900 text-amber-50 hover:bg-stone-800"
                     >
                       {authMutation.isPending ? (
@@ -803,6 +1244,11 @@ export default function OnlinePlayScreen({
                                 <Globe2 className="size-4" />
                                 Open Lobby
                               </>
+                            ) : joinRoomMutation.isPending ? (
+                              <>
+                                <RefreshCw className="size-4 animate-spin" />
+                                Joining
+                              </>
                             ) : (
                               <>
                                 <Plus className="size-4" />
@@ -860,10 +1306,14 @@ export default function OnlinePlayScreen({
                   </div>
                   <Button
                     onClick={() => createRoomMutation.mutate()}
-                    disabled={!user || createRoomMutation.isPending}
+                    disabled={!canCreateRoom || createRoomMutation.isPending}
                     className="h-11 w-full rounded-2xl bg-stone-900 text-amber-50 hover:bg-stone-800"
                   >
-                    <Plus className="size-4" />
+                    {createRoomMutation.isPending ? (
+                      <RefreshCw className="size-4 animate-spin" />
+                    ) : (
+                      <Plus className="size-4" />
+                    )}
                     Create {roomVisibility} room
                   </Button>
                 </div>
@@ -903,6 +1353,7 @@ export default function OnlinePlayScreen({
               </CardContent>
             </Card>
 
+            {currentRoomId && (
             <Card
               ref={activeLobbyRef}
               className="scroll-mt-6 border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.42)]"
@@ -1194,6 +1645,7 @@ export default function OnlinePlayScreen({
                 )}
               </CardContent>
             </Card>
+            )}
 
             <Card className="border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.42)]">
               <CardHeader>

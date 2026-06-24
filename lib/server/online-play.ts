@@ -166,7 +166,14 @@ export function sanitizeRoom(
 function sanitizeLeaderboardEntry(
   entry: Pick<
     LeaderboardEntryDocument,
-    "userId" | "username" | "displayName" | "role" | "wins" | "updatedAt"
+    | "userId"
+    | "username"
+    | "displayName"
+    | "role"
+    | "gamesPlayed"
+    | "wins"
+    | "losses"
+    | "updatedAt"
   >,
 ): LeaderboardEntry {
   return {
@@ -174,7 +181,9 @@ function sanitizeLeaderboardEntry(
     username: entry.username,
     displayName: entry.displayName,
     role: entry.role,
+    gamesPlayed: entry.gamesPlayed,
     wins: entry.wins,
+    losses: entry.losses,
     updatedAt: entry.updatedAt.toISOString(),
   };
 }
@@ -421,6 +430,8 @@ export async function createRoom(input: {
     throw new Error("Room name must be at least 3 characters.");
   }
 
+  await ensureUserCanEnterRoom(input.owner);
+
   const room = await RoomModel.create({
     _id: `room_${randomUUID()}`,
     code: await makeRoomCode(),
@@ -457,6 +468,7 @@ export async function joinRoom(input: {
 
   const alreadyMember = room.members.some((member) => member.userId === input.identity.id);
   if (!alreadyMember) {
+    await ensureUserCanEnterRoom(input.identity, room._id);
     room.members.push({
       userId: input.identity.id,
       username: input.identity.username,
@@ -471,6 +483,52 @@ export async function joinRoom(input: {
   await publishRoomChange(room._id);
   await publishPublicRoomsChange();
   return result;
+}
+
+async function ensureUserCanEnterRoom(identity: SessionUser, targetRoomId?: string) {
+  const activeRooms = await RoomModel.find({
+    _id: targetRoomId ? { $ne: targetRoomId } : { $exists: true },
+    "members.userId": identity.id,
+    gameStatus: { $in: ["lobby", "playing"] },
+  });
+
+  const playingRoom = activeRooms.find((room) => room.gameStatus === "playing");
+  if (playingRoom) {
+    throw new Error("Leave your current game before joining another room.");
+  }
+
+  await Promise.all(
+    activeRooms.map(async (room) => {
+      room.members = room.members.filter((member) => member.userId !== identity.id);
+      room.tokenSelections = room.tokenSelections.filter(
+        (selection) => selection.userId !== identity.id,
+      );
+
+      if (room.ownerId === identity.id) {
+        const nextOwner = room.members[0];
+        if (nextOwner) {
+          room.ownerId = nextOwner.userId;
+        }
+      }
+
+      if (room.umpireId === identity.id) {
+        room.umpireId = null;
+      }
+
+      if (room.members.length === 0) {
+        await RoomModel.deleteOne({ _id: room._id });
+        emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
+        return;
+      }
+
+      await room.save();
+      await publishRoomChange(room._id);
+    }),
+  );
+
+  if (activeRooms.length > 0) {
+    await publishPublicRoomsChange();
+  }
 }
 
 function requireRoomMember(room: RoomDocument, identity: SessionUser) {
@@ -500,6 +558,10 @@ async function awardLeaderboardWin(room: RoomDocument, winner: Player) {
     return;
   }
 
+  const losers = room.members.filter((roomMember) =>
+    room.gameState?.players.some((player) => player.id === roomMember.userId && player.id !== winner.id),
+  );
+
   await LeaderboardEntryModel.findOneAndUpdate(
     { userId: member.userId },
     {
@@ -511,12 +573,55 @@ async function awardLeaderboardWin(room: RoomDocument, winner: Player) {
         role: member.role,
         updatedAt: new Date(),
       },
-      $inc: { wins: 1 },
+      $inc: { gamesPlayed: 1, wins: 1 },
     },
     { new: true, upsert: true },
   );
 
+  await Promise.all(
+    losers.map((loser) =>
+      LeaderboardEntryModel.findOneAndUpdate(
+        { userId: loser.userId },
+        {
+          $set: {
+            _id: `leaderboard_${loser.userId}`,
+            userId: loser.userId,
+            username: loser.username,
+            displayName: loser.displayName,
+            role: loser.role,
+            updatedAt: new Date(),
+          },
+          $inc: { gamesPlayed: 1, losses: 1 },
+        },
+        { new: true, upsert: true },
+      ),
+    ),
+  );
+
   room.leaderboardAwarded = true;
+}
+
+async function awardLeaderboardLoss(member: {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: SessionUser["role"];
+}) {
+  await LeaderboardEntryModel.findOneAndUpdate(
+    { userId: member.userId },
+    {
+      $set: {
+        _id: `leaderboard_${member.userId}`,
+        userId: member.userId,
+        username: member.username,
+        displayName: member.displayName,
+        role: member.role,
+        updatedAt: new Date(),
+      },
+      $inc: { gamesPlayed: 1, losses: 1 },
+    },
+    { new: true, upsert: true },
+  );
 }
 
 async function resolveOnlineLanding(
@@ -858,6 +963,100 @@ export async function playOnlineRoomCard(input: {
   return await saveOnlineRoomChange(room);
 }
 
+export async function leaveRoom(input: {
+  roomId: string;
+  identity: SessionUser;
+}) {
+  const room = await requireRoom(input.roomId);
+  const member = requireRoomMember(room, input.identity);
+  const wasPlaying =
+    room.gameStatus === "playing" &&
+    Boolean(room.gameState?.players.some((player) => player.id === input.identity.id));
+
+  if (wasPlaying) {
+    await awardLeaderboardLoss(member);
+    room.gameState = room.gameState
+      ? {
+          ...room.gameState,
+          players: room.gameState.players.filter(
+            (player) => player.id !== input.identity.id,
+          ),
+          currentPlayerIndex: Math.min(
+            room.gameState.currentPlayerIndex,
+            Math.max(0, room.gameState.players.length - 2),
+          ),
+          lastEvent: {
+            type: "moved",
+            playerName: member.displayName,
+            playerColor:
+              room.gameState.players.find((player) => player.id === input.identity.id)
+                ?.color ?? "red",
+            message: `${member.displayName} left the game and took a loss.`,
+          },
+        }
+      : null;
+  }
+
+  room.members = room.members.filter((roomMember) => roomMember.userId !== input.identity.id);
+  room.tokenSelections = room.tokenSelections.filter(
+    (selection) => selection.userId !== input.identity.id,
+  );
+
+  if (room.ownerId === input.identity.id) {
+    const nextOwner = room.members[0];
+    if (nextOwner) {
+      room.ownerId = nextOwner.userId;
+    }
+  }
+
+  if (room.umpireId === input.identity.id) {
+    room.umpireId = null;
+  }
+
+  if (room.members.length === 0) {
+    await RoomModel.deleteOne({ _id: room._id });
+    emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
+    await publishPublicRoomsChange();
+    return null;
+  }
+
+  if (
+    room.gameStatus === "playing" &&
+    (room.gameState?.players.length ?? 0) < 2
+  ) {
+    room.gameStatus = "won";
+    room.gameState = room.gameState ? { ...room.gameState, phase: "won" } : null;
+  }
+
+  return await saveOnlineRoomChange(room);
+}
+
+export async function closeRoom(input: {
+  roomId: string;
+  identity: SessionUser;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  if (room.ownerId !== input.identity.id) {
+    throw new Error("Only the room owner can close this room.");
+  }
+
+  if (room.gameStatus === "playing") {
+    await Promise.all(
+      room.members
+        .filter((member) =>
+          room.gameState?.players.some((player) => player.id === member.userId),
+        )
+        .map((member) => awardLeaderboardLoss(member)),
+    );
+  }
+
+  await RoomModel.deleteOne({ _id: room._id });
+  emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
+  await publishPublicRoomsChange();
+}
+
 export async function listLeaderboard() {
   await connectToDatabase();
   const leaderboard = await LeaderboardEntryModel.find()
@@ -866,6 +1065,28 @@ export async function listLeaderboard() {
     .lean<LeaderboardEntryDocument[]>();
 
   return leaderboard.map(sanitizeLeaderboardEntry);
+}
+
+export async function getUserLeaderboardStats(identity: SessionUser) {
+  await connectToDatabase();
+  const stats = await LeaderboardEntryModel.findOne({
+    userId: identity.id,
+  }).lean<LeaderboardEntryDocument | null>();
+
+  if (!stats) {
+    return {
+      userId: identity.id,
+      username: identity.username,
+      displayName: identity.displayName,
+      role: identity.role,
+      gamesPlayed: 0,
+      wins: 0,
+      losses: 0,
+      updatedAt: new Date(0).toISOString(),
+    } satisfies LeaderboardEntry;
+  }
+
+  return sanitizeLeaderboardEntry(stats);
 }
 
 export async function createInvitation(input: {

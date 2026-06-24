@@ -62,7 +62,9 @@ export interface LeaderboardEntryDocument {
   username: string;
   displayName: string;
   role: SessionUserRole;
+  gamesPlayed: number;
   wins: number;
+  losses: number;
   updatedAt: Date;
 }
 
@@ -164,7 +166,9 @@ const LeaderboardEntrySchema = new Schema<LeaderboardEntryDocument>(
     username: { type: String, required: true },
     displayName: { type: String, required: true },
     role: { type: String, required: true, enum: ["account", "guest"] },
+    gamesPlayed: { type: Number, required: true, default: 0 },
     wins: { type: Number, required: true, default: 0 },
+    losses: { type: Number, required: true, default: 0 },
     updatedAt: { type: Date, default: Date.now },
   },
   { versionKey: false },

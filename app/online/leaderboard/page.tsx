@@ -57,7 +57,7 @@ export default async function OnlineLeaderboardPage() {
                       {entry.wins}
                     </div>
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-400">
-                      wins
+                      {entry.gamesPlayed} played · {entry.losses} losses
                     </div>
                   </div>
                 </div>

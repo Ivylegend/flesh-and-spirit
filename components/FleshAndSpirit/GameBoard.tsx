@@ -114,12 +114,14 @@ interface GameBoardProps {
   players: Player[];
   getDisplayPosition: (player: Player) => number;
   animatingToken: AnimatingToken | null;
+  onTileClick?: (tile: number) => void;
 }
 
 export default function GameBoard({
   players,
   getDisplayPosition,
   animatingToken,
+  onTileClick,
 }: GameBoardProps) {
   const COLS = 6;
   const ROWS = 9;
@@ -134,7 +136,7 @@ export default function GameBoard({
 
   return (
     <div
-      className="w-full grid gap-1 p-2 rounded-2xl bg-amber-50 border border-amber-100"
+      className="grid h-full w-full gap-1 rounded-2xl border border-amber-100 bg-amber-50 p-2"
       style={{
         gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
         gridTemplateRows: `repeat(${ROWS}, minmax(0, 1fr))`,
@@ -170,10 +172,12 @@ export default function GameBoard({
         const isAnimatingHere =
           animatingToken !== null && animatingToken.visibleTile === num;
 
-        return (
-          <div
+          return (
+          <button
+            type="button"
             key={num}
             style={{ gridRow, gridColumn: gridCol }}
+            onClick={() => onTileClick?.(num)}
             className={`
               relative flex flex-col items-center justify-center
               rounded-lg border transition-all duration-150
@@ -183,7 +187,7 @@ export default function GameBoard({
           >
             <TileContent num={num} type={type} />
             <PlayerTokens players={tilePlayers} animating={isAnimatingHere} />
-          </div>
+          </button>
         );
       })}
     </div>
