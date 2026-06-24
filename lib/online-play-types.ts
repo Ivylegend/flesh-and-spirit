@@ -1,5 +1,12 @@
 export type SessionUserRole = "account" | "guest";
 export type RoomVisibility = "public" | "private";
+export type OnlineGameStatus = "lobby" | "playing" | "won";
+
+import type { GameState, TokenColor } from "@/components/FleshAndSpirit/gameConstants";
+
+export interface OnlineGameState extends GameState {
+  animatingToken: null;
+}
 
 export interface SessionUser {
   id: string;
@@ -16,15 +23,35 @@ export interface RoomMember {
   joinedAt: string;
 }
 
+export interface RoomTokenSelection {
+  userId: string;
+  color: TokenColor;
+  selectedAt: string;
+}
+
 export interface RoomSummary {
   id: string;
   code: string;
   name: string;
   visibility: RoomVisibility;
   ownerId: string;
+  umpireId: string | null;
+  gameStatus: OnlineGameStatus;
+  gameState: OnlineGameState | null;
+  winnerId: string | null;
   memberCount: number;
   members: RoomMember[];
+  tokenSelections: RoomTokenSelection[];
   createdAt: string;
+}
+
+export interface LeaderboardEntry {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: SessionUserRole;
+  wins: number;
+  updatedAt: string;
 }
 
 export interface InvitationSummary {
@@ -47,6 +74,10 @@ export interface PublicRoomsResponse {
 
 export interface RoomResponse {
   room: RoomSummary;
+}
+
+export interface LeaderboardResponse {
+  leaderboard: LeaderboardEntry[];
 }
 
 export interface AuthResponse {

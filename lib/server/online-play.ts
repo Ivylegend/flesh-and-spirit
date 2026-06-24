@@ -1,17 +1,34 @@
 import "server-only";
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { HydratedDocument } from "mongoose";
 
 import {
   InvitationSummary,
+  LeaderboardEntry,
+  OnlineGameState,
   RoomSummary,
   RoomVisibility,
   SessionUser,
 } from "@/lib/online-play-types";
+import {
+  ALL_COLORS,
+  createDeck,
+  HOLY_SPIRIT_CARDS_PER_PLAYER,
+  HOLY_SPIRIT_TILES,
+  Player,
+  resolveSinChain,
+  SIN_TILES,
+  START_TILE,
+  TOTAL_TILES,
+  TokenColor,
+} from "@/components/FleshAndSpirit/gameConstants";
 import { connectToDatabase } from "@/lib/server/db";
 import {
   InvitationDocument,
   InvitationModel,
+  LeaderboardEntryDocument,
+  LeaderboardEntryModel,
   RoomDocument,
   RoomModel,
   SessionModel,
@@ -102,13 +119,33 @@ export function getSessionCookieName() {
   return SESSION_COOKIE;
 }
 
-export function sanitizeRoom(room: Pick<RoomDocument, "_id" | "code" | "name" | "visibility" | "ownerId" | "members" | "createdAt">): RoomSummary {
+export function sanitizeRoom(
+  room: Pick<
+    RoomDocument,
+    | "_id"
+    | "code"
+    | "name"
+    | "visibility"
+    | "ownerId"
+    | "umpireId"
+    | "gameStatus"
+    | "gameState"
+    | "winnerId"
+    | "members"
+    | "tokenSelections"
+    | "createdAt"
+  >,
+): RoomSummary {
   return {
     id: room._id,
     code: room.code,
     name: room.name,
     visibility: room.visibility,
     ownerId: room.ownerId,
+    umpireId: room.umpireId,
+    gameStatus: room.gameStatus ?? "lobby",
+    gameState: room.gameState ?? null,
+    winnerId: room.winnerId ?? null,
     memberCount: room.members.length,
     members: room.members.map((member) => ({
       userId: member.userId,
@@ -117,7 +154,28 @@ export function sanitizeRoom(room: Pick<RoomDocument, "_id" | "code" | "name" | 
       role: member.role,
       joinedAt: member.joinedAt.toISOString(),
     })),
+    tokenSelections: (room.tokenSelections ?? []).map((selection) => ({
+      userId: selection.userId,
+      color: selection.color,
+      selectedAt: selection.selectedAt.toISOString(),
+    })),
     createdAt: room.createdAt.toISOString(),
+  };
+}
+
+function sanitizeLeaderboardEntry(
+  entry: Pick<
+    LeaderboardEntryDocument,
+    "userId" | "username" | "displayName" | "role" | "wins" | "updatedAt"
+  >,
+): LeaderboardEntry {
+  return {
+    userId: entry.userId,
+    username: entry.username,
+    displayName: entry.displayName,
+    role: entry.role,
+    wins: entry.wins,
+    updatedAt: entry.updatedAt.toISOString(),
   };
 }
 
@@ -413,6 +471,401 @@ export async function joinRoom(input: {
   await publishRoomChange(room._id);
   await publishPublicRoomsChange();
   return result;
+}
+
+function requireRoomMember(room: RoomDocument, identity: SessionUser) {
+  const member = room.members.find((roomMember) => roomMember.userId === identity.id);
+  if (!member) {
+    throw new Error("Join this room before opening the lobby.");
+  }
+
+  return member;
+}
+
+function canManageRoom(room: RoomDocument, identity: SessionUser) {
+  return room.ownerId === identity.id || room.umpireId === identity.id;
+}
+
+function dealCardsFrom(deck: RoomDocument["gameDeck"], count: number) {
+  return deck.splice(0, count);
+}
+
+async function awardLeaderboardWin(room: RoomDocument, winner: Player) {
+  if (room.leaderboardAwarded) {
+    return;
+  }
+
+  const member = room.members.find((roomMember) => roomMember.userId === winner.id);
+  if (!member) {
+    return;
+  }
+
+  await LeaderboardEntryModel.findOneAndUpdate(
+    { userId: member.userId },
+    {
+      $set: {
+        _id: `leaderboard_${member.userId}`,
+        userId: member.userId,
+        username: member.username,
+        displayName: member.displayName,
+        role: member.role,
+        updatedAt: new Date(),
+      },
+      $inc: { wins: 1 },
+    },
+    { new: true, upsert: true },
+  );
+
+  room.leaderboardAwarded = true;
+}
+
+async function resolveOnlineLanding(
+  room: RoomDocument,
+  state: OnlineGameState,
+  playerId: string,
+  tile: number,
+): Promise<OnlineGameState> {
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (!player) {
+    return state;
+  }
+
+  if (tile === TOTAL_TILES) {
+    const nextState: OnlineGameState = {
+      ...state,
+      players: state.players.map((candidate) =>
+        candidate.id === playerId
+          ? { ...candidate, position: tile, hasWon: true }
+          : candidate,
+      ),
+      phase: "won",
+      pendingHolySpiritChoice: false,
+      animatingToken: null,
+      lastEvent: {
+        type: "won",
+        playerName: player.name,
+        playerColor: player.color,
+        message: `${player.name} reached the Crown and won the game!`,
+      },
+    };
+
+    room.gameStatus = "won";
+    room.winnerId = playerId;
+    await awardLeaderboardWin(room, player);
+    return nextState;
+  }
+
+  if (HOLY_SPIRIT_TILES.has(tile)) {
+    return {
+      ...state,
+      players: state.players.map((candidate) =>
+        candidate.id === playerId ? { ...candidate, position: tile } : candidate,
+      ),
+      pendingHolySpiritChoice: true,
+      lastEvent: {
+        type: "holy_spirit_triggered",
+        playerName: player.name,
+        playerColor: player.color,
+        toTile: tile,
+        message: `${player.name} landed on a Holy Spirit tile. Choose a card.`,
+      },
+    };
+  }
+
+  if (SIN_TILES[tile]) {
+    const sin = SIN_TILES[tile];
+    const { finalTile, chain } = resolveSinChain(tile);
+    const chainNames = chain.map((chainTile) => SIN_TILES[chainTile]?.name).join(" -> ");
+
+    return {
+      ...state,
+      players: state.players.map((candidate) =>
+        candidate.id === playerId ? { ...candidate, position: finalTile } : candidate,
+      ),
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % state.players.length,
+      pendingHolySpiritChoice: false,
+      lastEvent: {
+        type: "sin_triggered",
+        playerName: player.name,
+        playerColor: player.color,
+        fromTile: tile,
+        toTile: finalTile,
+        sinName: sin.name,
+        message:
+          chain.length > 1
+            ? `${player.name} hit ${chainNames}. Sent to tile ${finalTile}.`
+            : `${player.name} landed on ${sin.name}. Sent back to tile ${finalTile}.`,
+      },
+    };
+  }
+
+  return {
+    ...state,
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, position: tile } : candidate,
+    ),
+    currentPlayerIndex: (state.currentPlayerIndex + 1) % state.players.length,
+    pendingHolySpiritChoice: false,
+    lastEvent: {
+      type: "moved",
+      playerName: player.name,
+      playerColor: player.color,
+      fromTile: player.position,
+      toTile: tile,
+      message: `${player.name} moved to tile ${tile}.`,
+    },
+  };
+}
+
+async function saveOnlineRoomChange(room: HydratedDocument<RoomDocument>) {
+  await room.save();
+  const result = sanitizeRoom(room.toObject());
+  await publishRoomChange(room._id);
+  await publishPublicRoomsChange();
+  return result;
+}
+
+export async function selectRoomToken(input: {
+  roomId: string;
+  identity: SessionUser;
+  color: TokenColor;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  if (room.gameStatus !== "lobby") {
+    throw new Error("Token colors can only be changed before the game starts.");
+  }
+
+  if (!ALL_COLORS.includes(input.color)) {
+    throw new Error("Choose a valid token color.");
+  }
+
+  const selectedByOtherUser = room.tokenSelections.some(
+    (selection) =>
+      selection.color === input.color && selection.userId !== input.identity.id,
+  );
+
+  if (selectedByOtherUser) {
+    throw new Error("That token color has already been selected.");
+  }
+
+  room.tokenSelections = room.tokenSelections.filter(
+    (selection) => selection.userId !== input.identity.id,
+  );
+  room.tokenSelections.push({
+    userId: input.identity.id,
+    color: input.color,
+    selectedAt: new Date(),
+  });
+
+  return await saveOnlineRoomChange(room);
+}
+
+export async function assignRoomUmpire(input: {
+  roomId: string;
+  identity: SessionUser;
+  umpireUserId: string | null;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  if (room.ownerId !== input.identity.id) {
+    throw new Error("Only the room owner can assign an umpire.");
+  }
+
+  if (
+    input.umpireUserId &&
+    !room.members.some((member) => member.userId === input.umpireUserId)
+  ) {
+    throw new Error("Choose a current room member as umpire.");
+  }
+
+  room.umpireId = input.umpireUserId;
+  return await saveOnlineRoomChange(room);
+}
+
+export async function startOnlineRoomGame(input: {
+  roomId: string;
+  identity: SessionUser;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  if (!canManageRoom(room, input.identity)) {
+    throw new Error("Only the room owner or assigned umpire can start the game.");
+  }
+
+  if (room.gameStatus !== "lobby") {
+    throw new Error("This game has already started.");
+  }
+
+  if (room.tokenSelections.length < 2) {
+    throw new Error("At least 2 players must choose token colors before starting.");
+  }
+
+  const deck = createDeck();
+  const players = room.tokenSelections
+    .map((selection): Player | null => {
+      const member = room.members.find((candidate) => candidate.userId === selection.userId);
+      if (!member) {
+        return null;
+      }
+
+      return {
+        id: member.userId,
+        name: member.displayName,
+        color: selection.color,
+        position: START_TILE,
+        cards: dealCardsFrom(deck, HOLY_SPIRIT_CARDS_PER_PLAYER),
+        hasWon: false,
+      };
+    })
+    .filter((player): player is Player => Boolean(player));
+
+  if (players.length < 2) {
+    throw new Error("At least 2 selected players must still be in the room.");
+  }
+
+  room.gameStatus = "playing";
+  room.winnerId = null;
+  room.leaderboardAwarded = false;
+  room.gameDeck = deck;
+  room.gameDiscard = [];
+  room.gameState = {
+    phase: "playing",
+    players,
+    currentPlayerIndex: 0,
+    diceValue: null,
+    isRolling: false,
+    lastEvent: null,
+    pendingHolySpiritChoice: false,
+    animatingToken: null,
+  };
+
+  return await saveOnlineRoomChange(room);
+}
+
+export async function rollOnlineRoomDice(input: {
+  roomId: string;
+  identity: SessionUser;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  const state = room.gameState;
+  if (!state || room.gameStatus !== "playing" || state.phase !== "playing") {
+    throw new Error("Start the game before rolling.");
+  }
+
+  if (state.pendingHolySpiritChoice) {
+    throw new Error("Choose a Holy Spirit card before rolling again.");
+  }
+
+  const player = state.players[state.currentPlayerIndex];
+  if (!player || player.id !== input.identity.id) {
+    throw new Error("Wait for your turn before rolling.");
+  }
+
+  const rolled = Math.floor(Math.random() * 6) + 1;
+  const targetTile = player.position + rolled;
+
+  if (targetTile > TOTAL_TILES) {
+    room.gameState = {
+      ...state,
+      diceValue: rolled,
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % state.players.length,
+      lastEvent: {
+        type: "dice_rolled",
+        playerName: player.name,
+        playerColor: player.color,
+        message: `${player.name} rolled ${rolled} and needs exactly ${
+          TOTAL_TILES - player.position
+        } to reach the Crown. Turn passes.`,
+      },
+    };
+  } else {
+    room.gameState = await resolveOnlineLanding(room, {
+      ...state,
+      diceValue: rolled,
+      lastEvent: {
+        type: "dice_rolled",
+        playerName: player.name,
+        playerColor: player.color,
+        message: `${player.name} rolled ${rolled}.`,
+      },
+    }, player.id, targetTile);
+  }
+
+  return await saveOnlineRoomChange(room);
+}
+
+export async function playOnlineRoomCard(input: {
+  roomId: string;
+  identity: SessionUser;
+  cardId: string;
+}) {
+  const room = await requireRoom(input.roomId);
+  requireRoomMember(room, input.identity);
+
+  const state = room.gameState;
+  if (!state || room.gameStatus !== "playing" || state.phase !== "playing") {
+    throw new Error("Start the game before using cards.");
+  }
+
+  if (!state.pendingHolySpiritChoice) {
+    throw new Error("There is no Holy Spirit card choice pending.");
+  }
+
+  const player = state.players[state.currentPlayerIndex];
+  if (!player || player.id !== input.identity.id) {
+    throw new Error("Only the current player can choose a Holy Spirit card.");
+  }
+
+  const card = player.cards.find((candidate) => candidate.id === input.cardId);
+  if (!card) {
+    throw new Error("That card is not in your hand.");
+  }
+
+  room.gameDiscard.push(card);
+  const [newCard] = dealCardsFrom(room.gameDeck, 1);
+  const nextCards = player.cards
+    .filter((candidate) => candidate.id !== input.cardId)
+    .concat(newCard ? [newCard] : []);
+  const targetTile = Math.min(player.position + card.steps, TOTAL_TILES);
+
+  room.gameState = await resolveOnlineLanding(
+    room,
+    {
+      ...state,
+      pendingHolySpiritChoice: false,
+      players: state.players.map((candidate) =>
+        candidate.id === player.id ? { ...candidate, cards: nextCards } : candidate,
+      ),
+      lastEvent: {
+        type: "card_used",
+        playerName: player.name,
+        playerColor: player.color,
+        cardAttribute: card.attribute,
+        cardSteps: card.steps,
+        message: `${player.name} used "${card.attribute}" (+${card.steps} steps).`,
+      },
+    },
+    player.id,
+    targetTile,
+  );
+
+  return await saveOnlineRoomChange(room);
+}
+
+export async function listLeaderboard() {
+  await connectToDatabase();
+  const leaderboard = await LeaderboardEntryModel.find()
+    .sort({ wins: -1, updatedAt: 1 })
+    .limit(50)
+    .lean<LeaderboardEntryDocument[]>();
+
+  return leaderboard.map(sanitizeLeaderboardEntry);
 }
 
 export async function createInvitation(input: {

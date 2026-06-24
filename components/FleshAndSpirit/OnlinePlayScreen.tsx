@@ -3,6 +3,7 @@
 import {
   type ReactNode,
   startTransition,
+  useCallback,
   useDeferredValue,
   useEffect,
   useEffectEvent,
@@ -21,11 +22,14 @@ import {
   RefreshCw,
   Shield,
   Sparkles,
+  Trophy,
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 
+import GameBoard from "@/components/FleshAndSpirit/GameBoard";
+import GameControls from "@/components/FleshAndSpirit/GameControls";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -45,6 +49,12 @@ import type {
   RoomSummary,
   SessionResponse,
 } from "@/lib/online-play-types";
+import {
+  ALL_COLORS,
+  Player,
+  TOKEN_COLORS,
+  TokenColor,
+} from "@/components/FleshAndSpirit/gameConstants";
 
 type AuthView = "signin" | "signup" | "guest";
 type SocketState = "idle" | "connecting" | "connected" | "error";
@@ -122,6 +132,7 @@ export default function OnlinePlayScreen({
 }: OnlinePlayScreenProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const activeLobbyRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const handledInviteRef = useRef<string | null>(inviteToken ?? null);
 
@@ -202,9 +213,34 @@ export default function OnlinePlayScreen({
     queryClient.setQueryData<PublicRoomsResponse>(["public-rooms"], { rooms });
   });
 
+  const cacheRoom = (room: RoomSummary) => {
+    setLiveRoom(room);
+    queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
+  };
+
   const refreshSession = () => {
     void queryClient.invalidateQueries({ queryKey: ["session"] });
     void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+  };
+
+  const focusActiveLobby = useCallback(() => {
+    requestAnimationFrame(() => {
+      activeLobbyRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, []);
+
+  const openRoom = (room: RoomSummary) => {
+    cacheRoom(room);
+    appendActivity(`Opened lobby "${room.name}".`);
+
+    if (currentRoomId !== room.id) {
+      router.push(`/online/rooms/${room.id}`);
+    }
+
+    focusActiveLobby();
   };
 
   const authMutation = useMutation({
@@ -302,6 +338,81 @@ export default function OnlinePlayScreen({
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "Unable to join room.");
+    },
+  });
+
+  const selectTokenMutation = useMutation({
+    mutationFn: async (color: TokenColor) =>
+      await apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}/token`, {
+        method: "POST",
+        body: JSON.stringify({ color }),
+      }),
+    onSuccess: ({ room }) => {
+      cacheRoom(room);
+      toast.success("Token color selected.");
+      appendActivity("Token selection updated.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to select token.");
+    },
+  });
+
+  const assignUmpireMutation = useMutation({
+    mutationFn: async (umpireUserId: string | null) =>
+      await apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}/umpire`, {
+        method: "POST",
+        body: JSON.stringify({ umpireUserId }),
+      }),
+    onSuccess: ({ room }) => {
+      cacheRoom(room);
+      toast.success("Umpire updated.");
+      appendActivity("Room umpire updated.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to assign umpire.");
+    },
+  });
+
+  const startGameMutation = useMutation({
+    mutationFn: async () =>
+      await apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}/start`, {
+        method: "POST",
+      }),
+    onSuccess: ({ room }) => {
+      cacheRoom(room);
+      toast.success("Game started.");
+      appendActivity("The online game has started.");
+      focusActiveLobby();
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to start game.");
+    },
+  });
+
+  const rollDiceMutation = useMutation({
+    mutationFn: async () =>
+      await apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}/roll`, {
+        method: "POST",
+      }),
+    onSuccess: ({ room }) => {
+      cacheRoom(room);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to roll.");
+    },
+  });
+
+  const useCardMutation = useMutation({
+    mutationFn: async (cardId: string) =>
+      await apiRequest<RoomResponse>(`/api/rooms/${currentRoomId}/card`, {
+        method: "POST",
+        body: JSON.stringify({ cardId }),
+      }),
+    onSuccess: ({ room }) => {
+      cacheRoom(room);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to use card.");
     },
   });
 
@@ -440,6 +551,38 @@ export default function OnlinePlayScreen({
     acceptInviteMutation.mutate(inviteToken);
   }, [acceptInviteMutation, inviteToken, user]);
 
+  useEffect(() => {
+    if (activeRoom && currentRoomId) {
+      focusActiveLobby();
+    }
+  }, [activeRoom, currentRoomId, focusActiveLobby]);
+
+  const selectedColorByUser = new Map(
+    activeRoom?.tokenSelections.map((selection) => [
+      selection.userId,
+      selection.color,
+    ]) ?? [],
+  );
+  const selectedUserByColor = new Map(
+    activeRoom?.tokenSelections.map((selection) => [
+      selection.color,
+      selection.userId,
+    ]) ?? [],
+  );
+  const currentUserSelection = user ? selectedColorByUser.get(user.id) : null;
+  const activePlayers = activeRoom?.gameState?.players ?? [];
+  const currentPlayer =
+    activeRoom?.gameState?.players[activeRoom.gameState.currentPlayerIndex] ?? null;
+  const isOwner = Boolean(user && activeRoom?.ownerId === user.id);
+  const isUmpire = Boolean(user && activeRoom?.umpireId === user.id);
+  const canManageActiveRoom = isOwner || isUmpire;
+  const canStartActiveRoom =
+    activeRoom?.gameStatus === "lobby" &&
+    activeRoom.tokenSelections.length >= 2 &&
+    canManageActiveRoom;
+  const isCurrentOnlinePlayer = Boolean(user && currentPlayer?.id === user.id);
+  const getOnlineDisplayPosition = (player: Player) => player.position;
+
   async function copyInviteUrl() {
     if (!latestInviteUrl) {
       return;
@@ -450,7 +593,7 @@ export default function OnlinePlayScreen({
   }
 
   return (
-    <div className="min-h-screen bg-[linear-gradient(180deg,_#f8efe2_0%,_#f2e5d1_40%,_#efe4d5_100%)] text-stone-900">
+    <div className="min-h-screen bg-[linear-gradient(180deg,#f8efe2_0%,#f2e5d1_40%,#efe4d5_100%)] text-stone-900">
       <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
         <div className="mb-6 flex flex-col gap-4 rounded-[2rem] border border-white/50 bg-white/70 p-5 shadow-[0_28px_90px_-38px_rgba(120,53,15,0.5)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -466,14 +609,24 @@ export default function OnlinePlayScreen({
               current while players come and go.
             </p>
           </div>
-          <Button
-            variant="outline"
-            className="h-10 rounded-2xl border-stone-300 bg-white/80 px-4"
-            onClick={() => router.push(backHref)}
-          >
-            <DoorOpen className="size-4" />
-            {backHref === "/" ? "Back Home" : "Back"}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              className="h-10 rounded-2xl border-stone-300 bg-white/80 px-4"
+              onClick={() => router.push("/online/leaderboard")}
+            >
+              <Trophy className="size-4" />
+              Leaderboard
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-2xl border-stone-300 bg-white/80 px-4"
+              onClick={() => router.push(backHref)}
+            >
+              <DoorOpen className="size-4" />
+              {backHref === "/" ? "Back Home" : "Back"}
+            </Button>
+          </div>
         </div>
 
         <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
@@ -639,7 +792,7 @@ export default function OnlinePlayScreen({
                           <Button
                             onClick={() =>
                               alreadyInside
-                                ? router.push(`/online/rooms/${room.id}`)
+                                ? openRoom(room)
                                 : joinRoomMutation.mutate(room.id)
                             }
                             disabled={!user || joinRoomMutation.isPending}
@@ -750,7 +903,10 @@ export default function OnlinePlayScreen({
               </CardContent>
             </Card>
 
-            <Card className="border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.42)]">
+            <Card
+              ref={activeLobbyRef}
+              className="scroll-mt-6 border-white/60 bg-white/85 shadow-[0_24px_80px_-32px_rgba(120,53,15,0.42)]"
+            >
               <CardHeader>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
@@ -797,36 +953,196 @@ export default function OnlinePlayScreen({
                       />
                     </div>
 
-                    <div className="rounded-3xl border border-stone-200 bg-stone-50/90 p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
-                          Members
-                        </h3>
-                        <span className="text-sm text-stone-500">
-                          {activeRoom.memberCount} connected
-                        </span>
-                      </div>
-                      <div className="space-y-2">
-                        {activeRoom.members.map((member) => (
-                          <div
-                            key={member.userId}
-                            className="flex items-center justify-between rounded-2xl bg-white px-3 py-2"
-                          >
-                            <div>
-                              <div className="font-medium text-stone-900">
-                                {member.displayName}
-                              </div>
-                              <div className="text-xs text-stone-500">
-                                @{member.username}
-                              </div>
-                            </div>
-                            <span className="rounded-full bg-stone-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600">
-                              {member.role}
+                    {activeRoom.gameStatus === "lobby" ? (
+                      <>
+                        <div className="rounded-3xl border border-stone-200 bg-stone-50/90 p-4">
+                          <div className="mb-3 flex items-center justify-between">
+                            <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                              Token Colors
+                            </h3>
+                            <span className="text-sm text-stone-500">
+                              {activeRoom.tokenSelections.length}/4 selected
                             </span>
                           </div>
-                        ))}
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {ALL_COLORS.map((color) => {
+                              const selectedUserId = selectedUserByColor.get(color);
+                              const selectedMember = activeRoom.members.find(
+                                (member) => member.userId === selectedUserId,
+                              );
+                              const isMine = currentUserSelection === color;
+                              const token = TOKEN_COLORS[color];
+
+                              return (
+                                <button
+                                  key={color}
+                                  type="button"
+                                  onClick={() => selectTokenMutation.mutate(color)}
+                                  disabled={
+                                    !user ||
+                                    selectTokenMutation.isPending ||
+                                    Boolean(selectedUserId && !isMine)
+                                  }
+                                  className={`flex items-center justify-between rounded-2xl border px-3 py-3 text-left transition ${
+                                    isMine
+                                      ? "border-stone-900 bg-white shadow-sm"
+                                      : selectedUserId
+                                        ? "border-stone-200 bg-stone-100 opacity-70"
+                                        : "border-stone-200 bg-white hover:border-stone-400"
+                                  }`}
+                                >
+                                  <span className="flex items-center gap-3">
+                                    <span
+                                      className={`size-5 rounded-full border-2 ${token.bg} ${token.border}`}
+                                    />
+                                    <span>
+                                      <span className="block text-sm font-semibold text-stone-900">
+                                        {token.label}
+                                      </span>
+                                      <span className="text-xs text-stone-500">
+                                        {selectedMember
+                                          ? selectedMember.displayName
+                                          : "Available"}
+                                      </span>
+                                    </span>
+                                  </span>
+                                  {isMine && (
+                                    <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700">
+                                      Yours
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="rounded-3xl border border-stone-200 bg-stone-50/90 p-4">
+                          <div className="mb-3 flex items-center justify-between">
+                            <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                              Players
+                            </h3>
+                            <span className="text-sm text-stone-500">
+                              {activeRoom.memberCount} in room
+                            </span>
+                          </div>
+                          <div className="space-y-2">
+                            {activeRoom.members.map((member) => {
+                              const selectedColor = selectedColorByUser.get(member.userId);
+
+                              return (
+                                <div
+                                  key={member.userId}
+                                  className="flex items-center justify-between gap-3 rounded-2xl bg-white px-3 py-2"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate font-medium text-stone-900">
+                                      {member.displayName}
+                                    </div>
+                                    <div className="text-xs text-stone-500">
+                                      @{member.username}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {selectedColor ? (
+                                      <span
+                                        className={`size-4 rounded-full border-2 ${TOKEN_COLORS[selectedColor].bg} ${TOKEN_COLORS[selectedColor].border}`}
+                                        title={TOKEN_COLORS[selectedColor].label}
+                                      />
+                                    ) : (
+                                      <span className="text-xs text-stone-400">
+                                        no token
+                                      </span>
+                                    )}
+                                    {member.userId === activeRoom.ownerId && (
+                                      <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-800">
+                                        owner
+                                      </span>
+                                    )}
+                                    {member.userId === activeRoom.umpireId && (
+                                      <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-800">
+                                        umpire
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-[1fr_auto]">
+                          {isOwner ? (
+                            <select
+                              value={activeRoom.umpireId ?? ""}
+                              onChange={(event) =>
+                                assignUmpireMutation.mutate(event.target.value || null)
+                              }
+                              disabled={assignUmpireMutation.isPending}
+                              className="h-11 rounded-2xl border border-stone-200 bg-white px-3 text-sm text-stone-700 outline-none focus:border-stone-400"
+                            >
+                              <option value="">Owner starts the game</option>
+                              {activeRoom.members
+                                .filter((member) => member.userId !== activeRoom.ownerId)
+                                .map((member) => (
+                                  <option key={member.userId} value={member.userId}>
+                                    {member.displayName} can start as umpire
+                                  </option>
+                                ))}
+                            </select>
+                          ) : (
+                            <div className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-600">
+                              {activeRoom.umpireId
+                                ? "The owner has assigned an umpire to start the game."
+                                : "The owner can start once at least 2 players select tokens."}
+                            </div>
+                          )}
+                          <Button
+                            onClick={() => startGameMutation.mutate()}
+                            disabled={!canStartActiveRoom || startGameMutation.isPending}
+                            className="h-11 rounded-2xl bg-stone-900 px-4 text-amber-50 hover:bg-stone-800"
+                          >
+                            <Sparkles className="size-4" />
+                            Start Game
+                          </Button>
+                        </div>
+                      </>
+                    ) : activeRoom.gameState ? (
+                      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+                        <div className="rounded-3xl border border-amber-100 bg-amber-50 p-3">
+                          <GameBoard
+                            players={activePlayers}
+                            getDisplayPosition={getOnlineDisplayPosition}
+                            animatingToken={null}
+                          />
+                        </div>
+                        <div className="rounded-3xl border border-stone-200 bg-white p-3">
+                          <GameControls
+                            players={activePlayers}
+                            currentPlayer={currentPlayer}
+                            diceValue={activeRoom.gameState.diceValue}
+                            isRolling={
+                              activeRoom.gameState.isRolling || rollDiceMutation.isPending
+                            }
+                            isAnimating={false}
+                            lastEvent={activeRoom.gameState.lastEvent}
+                            pendingHolySpiritChoice={
+                              activeRoom.gameState.pendingHolySpiritChoice
+                            }
+                            onRoll={() => rollDiceMutation.mutate()}
+                            onUseCard={(cardId) => useCardMutation.mutate(cardId)}
+                            onReset={() => router.push("/online")}
+                            gamePhase={activeRoom.gameState.phase}
+                            canRoll={isCurrentOnlinePlayer}
+                            canUseCards={isCurrentOnlinePlayer}
+                          />
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="rounded-3xl border border-dashed border-stone-300 bg-stone-50/90 px-4 py-10 text-center text-sm leading-6 text-stone-500">
+                        Waiting for the game state to sync.
+                      </div>
+                    )}
 
                     <div className="grid gap-3 lg:grid-cols-[1fr_auto]">
                       <Input

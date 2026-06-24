@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 
+import nextEnv from "@next/env";
 import mongoose from "mongoose";
 import next from "next";
 import { Server as SocketIOServer } from "socket.io";
@@ -7,6 +8,9 @@ import { Server as SocketIOServer } from "socket.io";
 import { onRealtimeEvent, REALTIME_EVENTS } from "./lib/server/realtime.js";
 
 const dev = process.env.NODE_ENV !== "production";
+const { loadEnvConfig } = nextEnv;
+loadEnvConfig(process.cwd(), dev);
+
 const hostname = process.env.HOSTNAME || "localhost";
 const port = Number.parseInt(process.env.PORT || "3000", 10);
 const mongoUri = process.env.MONGODB_URI;
@@ -51,6 +55,10 @@ function serializeRoom(room) {
     name: room.name,
     visibility: room.visibility,
     ownerId: room.ownerId,
+    umpireId: room.umpireId ?? null,
+    gameStatus: room.gameStatus ?? "lobby",
+    gameState: room.gameState ?? null,
+    winnerId: room.winnerId ?? null,
     memberCount: Array.isArray(room.members) ? room.members.length : 0,
     members: (room.members || []).map((member) => ({
       userId: member.userId,
@@ -58,6 +66,11 @@ function serializeRoom(room) {
       displayName: member.displayName,
       role: member.role,
       joinedAt: new Date(member.joinedAt).toISOString(),
+    })),
+    tokenSelections: (room.tokenSelections || []).map((selection) => ({
+      userId: selection.userId,
+      color: selection.color,
+      selectedAt: new Date(selection.selectedAt).toISOString(),
     })),
     createdAt: new Date(room.createdAt).toISOString(),
   };
@@ -69,11 +82,11 @@ const app = next({
   hostname,
   port,
   httpServer,
+  webpack: dev,
 });
 const handle = app.getRequestHandler();
 
 await app.prepare();
-await connectToMongo();
 
 const io = new SocketIOServer(httpServer, {
   path: "/socket.io",

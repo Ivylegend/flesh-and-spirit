@@ -168,6 +168,8 @@ interface GameControlsProps {
   onUseCard: (cardId: string) => void;
   onReset: () => void;
   gamePhase: "playing" | "won" | "setup";
+  canRoll?: boolean;
+  canUseCards?: boolean;
 }
 
 export default function GameControls({
@@ -182,16 +184,19 @@ export default function GameControls({
   onUseCard,
   onReset,
   gamePhase,
+  canRoll: canRollOverride,
+  canUseCards = true,
 }: GameControlsProps) {
   const canRoll =
     !isRolling &&
     !pendingHolySpiritChoice &&
     !isAnimating &&
-    gamePhase === "playing";
+    gamePhase === "playing" &&
+    (canRollOverride ?? true);
 
   return (
     <>
-      {pendingHolySpiritChoice && currentPlayer && (
+      {pendingHolySpiritChoice && currentPlayer && canUseCards && (
         <HolySpiritPicker
           cards={currentPlayer.cards}
           playerName={currentPlayer.name}
