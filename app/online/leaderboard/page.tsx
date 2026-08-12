@@ -4,6 +4,8 @@ import { Trophy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listLeaderboard } from "@/lib/server/online-play";
 
+export const dynamic = "force-dynamic";
+
 export default async function OnlineLeaderboardPage() {
   const leaderboard = await listLeaderboard();
 

@@ -1,7 +1,6 @@
 import "server-only";
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { HydratedDocument } from "mongoose";
 
 import {
   InvitationSummary,
@@ -10,12 +9,14 @@ import {
   RoomSummary,
   RoomVisibility,
   SessionUser,
+  SessionUserRole,
 } from "@/lib/online-play-types";
 import {
   ALL_COLORS,
   createDeck,
   HOLY_SPIRIT_CARDS_PER_PLAYER,
   HOLY_SPIRIT_TILES,
+  HolySpiritCard,
   Player,
   resolveSinChain,
   SIN_TILES,
@@ -23,21 +24,78 @@ import {
   TOTAL_TILES,
   TokenColor,
 } from "@/components/FleshAndSpirit/gameConstants";
-import { connectToDatabase } from "@/lib/server/db";
-import {
-  InvitationDocument,
-  InvitationModel,
-  LeaderboardEntryDocument,
-  LeaderboardEntryModel,
-  RoomDocument,
-  RoomModel,
-  SessionModel,
-  UserDocument,
-  UserModel,
-} from "@/lib/server/models";
-import { REALTIME_EVENTS, emitRealtimeEvent } from "@/lib/server/realtime";
+import { getSupabaseAdmin } from "@/lib/server/supabase";
 
 const SESSION_COOKIE = "flesh_spirit_session";
+
+interface UserRow {
+  id: string;
+  username: string;
+  display_name: string;
+  role: SessionUserRole;
+  password_hash: string | null;
+  created_at: string;
+}
+
+interface SessionRow {
+  id: string;
+  token: string;
+  user_id: string;
+  created_at: string;
+}
+
+interface RoomMemberJson {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: SessionUserRole;
+  joinedAt: string;
+}
+
+interface RoomTokenSelectionJson {
+  userId: string;
+  color: TokenColor;
+  selectedAt: string;
+}
+
+interface RoomRow {
+  id: string;
+  code: string;
+  name: string;
+  visibility: RoomVisibility;
+  owner_id: string;
+  umpire_id: string | null;
+  game_status: "lobby" | "playing" | "won";
+  game_state: OnlineGameState | null;
+  game_deck: HolySpiritCard[];
+  game_discard: HolySpiritCard[];
+  winner_id: string | null;
+  leaderboard_awarded: boolean;
+  members: RoomMemberJson[];
+  token_selections: RoomTokenSelectionJson[];
+  created_at: string;
+}
+
+interface InvitationRow {
+  id: string;
+  token: string;
+  room_id: string;
+  created_by_user_id: string;
+  invitee_user_id: string | null;
+  created_at: string;
+  accepted_at: string | null;
+}
+
+interface LeaderboardEntryRow {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: SessionUserRole;
+  games_played: number;
+  wins: number;
+  losses: number;
+  updated_at: string;
+}
 
 function normalizeUsername(value: string) {
   return value.trim().toLowerCase();
@@ -49,18 +107,6 @@ function normalizeDisplayName(value: string) {
 
 function randomToken(size = 24) {
   return randomBytes(size).toString("base64url");
-}
-
-async function makeRoomCode() {
-  await connectToDatabase();
-
-  while (true) {
-    const code = randomBytes(3).toString("hex").toUpperCase();
-    const existingRoom = await RoomModel.exists({ code });
-    if (!existingRoom) {
-      return code;
-    }
-  }
 }
 
 function hashPassword(password: string) {
@@ -78,11 +124,7 @@ function verifyPassword(password: string, passwordHash: string) {
   const derivedKey = scryptSync(password, salt, 64);
   const storedBuffer = Buffer.from(storedHash, "hex");
 
-  if (storedBuffer.length !== derivedKey.length) {
-    return false;
-  }
-
-  return timingSafeEqual(storedBuffer, derivedKey);
+  return storedBuffer.length === derivedKey.length && timingSafeEqual(storedBuffer, derivedKey);
 }
 
 function ensureDisplayName(value: string, fallback: string) {
@@ -98,104 +140,84 @@ function makeGuestUsername(displayName: string) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 18);
 
-  const base = safeBase || "guest";
-  return `guest-${base}-${randomBytes(2).toString("hex")}`;
+  return `guest-${safeBase || "guest"}-${randomBytes(2).toString("hex")}`;
 }
 
-function toIdentity(user: Pick<UserDocument, "_id" | "role" | "username" | "displayName">): SessionUser {
+function toIdentity(user: Pick<UserRow, "id" | "role" | "username" | "display_name">): SessionUser {
   return {
-    id: user._id,
+    id: user.id,
     role: user.role,
     username: user.username,
-    displayName: user.displayName,
+    displayName: user.display_name,
   };
 }
 
-function serializeDate(value: Date | null | undefined) {
-  return value ? value.toISOString() : null;
+function serializeDate(value: string | Date | null | undefined) {
+  return value ? new Date(value).toISOString() : null;
+}
+
+function assertOk(error: unknown) {
+  if (error) {
+    throw new Error(error instanceof Error ? error.message : "Database request failed.");
+  }
 }
 
 export function getSessionCookieName() {
   return SESSION_COOKIE;
 }
 
-export function sanitizeRoom(
-  room: Pick<
-    RoomDocument,
-    | "_id"
-    | "code"
-    | "name"
-    | "visibility"
-    | "ownerId"
-    | "umpireId"
-    | "gameStatus"
-    | "gameState"
-    | "winnerId"
-    | "members"
-    | "tokenSelections"
-    | "createdAt"
-  >,
-): RoomSummary {
+export function sanitizeRoom(room: RoomRow): RoomSummary {
+  const members = Array.isArray(room.members) ? room.members : [];
+  const tokenSelections = Array.isArray(room.token_selections) ? room.token_selections : [];
+
   return {
-    id: room._id,
+    id: room.id,
     code: room.code,
     name: room.name,
     visibility: room.visibility,
-    ownerId: room.ownerId,
-    umpireId: room.umpireId,
-    gameStatus: room.gameStatus ?? "lobby",
-    gameState: room.gameState ?? null,
-    winnerId: room.winnerId ?? null,
-    memberCount: room.members.length,
-    members: room.members.map((member) => ({
+    ownerId: room.owner_id,
+    umpireId: room.umpire_id,
+    gameStatus: room.game_status ?? "lobby",
+    gameState: room.game_state ?? null,
+    winnerId: room.winner_id ?? null,
+    memberCount: members.length,
+    members: members.map((member) => ({
       userId: member.userId,
       username: member.username,
       displayName: member.displayName,
       role: member.role,
-      joinedAt: member.joinedAt.toISOString(),
+      joinedAt: serializeDate(member.joinedAt) ?? new Date().toISOString(),
     })),
-    tokenSelections: (room.tokenSelections ?? []).map((selection) => ({
+    tokenSelections: tokenSelections.map((selection) => ({
       userId: selection.userId,
       color: selection.color,
-      selectedAt: selection.selectedAt.toISOString(),
+      selectedAt: serializeDate(selection.selectedAt) ?? new Date().toISOString(),
     })),
-    createdAt: room.createdAt.toISOString(),
+    createdAt: serializeDate(room.created_at) ?? new Date().toISOString(),
   };
 }
 
-function sanitizeLeaderboardEntry(
-  entry: Pick<
-    LeaderboardEntryDocument,
-    | "userId"
-    | "username"
-    | "displayName"
-    | "role"
-    | "gamesPlayed"
-    | "wins"
-    | "losses"
-    | "updatedAt"
-  >,
-): LeaderboardEntry {
+function sanitizeLeaderboardEntry(entry: LeaderboardEntryRow): LeaderboardEntry {
   return {
-    userId: entry.userId,
+    userId: entry.user_id,
     username: entry.username,
-    displayName: entry.displayName,
+    displayName: entry.display_name,
     role: entry.role,
-    gamesPlayed: entry.gamesPlayed,
+    gamesPlayed: entry.games_played,
     wins: entry.wins,
     losses: entry.losses,
-    updatedAt: entry.updatedAt.toISOString(),
+    updatedAt: serializeDate(entry.updated_at) ?? new Date().toISOString(),
   };
 }
 
-export function sanitizeInvite(invite: Pick<InvitationDocument, "token" | "roomId" | "createdByUserId" | "inviteeUserId" | "createdAt" | "acceptedAt">): InvitationSummary {
+export function sanitizeInvite(invite: InvitationRow): InvitationSummary {
   return {
     token: invite.token,
-    roomId: invite.roomId,
-    createdByUserId: invite.createdByUserId,
-    inviteeUserId: invite.inviteeUserId,
-    createdAt: invite.createdAt.toISOString(),
-    acceptedAt: serializeDate(invite.acceptedAt),
+    roomId: invite.room_id,
+    createdByUserId: invite.created_by_user_id,
+    inviteeUserId: invite.invitee_user_id,
+    createdAt: serializeDate(invite.created_at) ?? new Date().toISOString(),
+    acceptedAt: serializeDate(invite.accepted_at),
     inviteLink: `/api/invitations/${invite.token}/accept`,
   };
 }
@@ -209,43 +231,106 @@ export function sanitizeIdentity(identity: SessionUser) {
   };
 }
 
-async function publishRoomChange(roomId: string) {
-  const room = await RoomModel.findById(roomId).lean<RoomDocument | null>();
-  if (!room) {
-    return;
+async function makeRoomCode() {
+  const supabase = getSupabaseAdmin();
+
+  while (true) {
+    const code = randomBytes(3).toString("hex").toUpperCase();
+    const { data, error } = await supabase
+      .from("fs_rooms")
+      .select("id")
+      .eq("code", code)
+      .maybeSingle();
+    assertOk(error);
+
+    if (!data) {
+      return code;
+    }
+  }
+}
+
+async function getUserRow(userId: string) {
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_users")
+    .select("*")
+    .eq("id", userId)
+    .maybeSingle();
+  assertOk(error);
+  return data as UserRow | null;
+}
+
+async function requireRoom(roomId: string) {
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle();
+  assertOk(error);
+
+  if (!data) {
+    throw new Error("Room not found.");
   }
 
-  emitRealtimeEvent(REALTIME_EVENTS.ROOM_UPDATED, {
-    room: sanitizeRoom(room),
-  });
+  return data as RoomRow;
 }
 
-async function publishPublicRoomsChange() {
-  const rooms = await listPublicRooms();
-  emitRealtimeEvent(REALTIME_EVENTS.PUBLIC_ROOMS_UPDATED, {
-    rooms,
-  });
+async function saveRoom(room: RoomRow) {
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_rooms")
+    .update({
+      code: room.code,
+      name: room.name,
+      visibility: room.visibility,
+      owner_id: room.owner_id,
+      umpire_id: room.umpire_id,
+      game_status: room.game_status,
+      game_state: room.game_state,
+      game_deck: room.game_deck,
+      game_discard: room.game_discard,
+      winner_id: room.winner_id,
+      leaderboard_awarded: room.leaderboard_awarded,
+      members: room.members,
+      token_selections: room.token_selections,
+    })
+    .eq("id", room.id)
+    .select("*")
+    .single();
+  assertOk(error);
+  return sanitizeRoom(data as RoomRow);
 }
 
-export async function getIdentityFromSessionId(
-  sessionId: string | null | undefined,
-) {
+async function deleteRoom(roomId: string) {
+  const { error } = await getSupabaseAdmin().from("fs_rooms").delete().eq("id", roomId);
+  assertOk(error);
+}
+
+async function listRooms() {
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_rooms")
+    .select("*")
+    .order("created_at", { ascending: false });
+  assertOk(error);
+  return (data ?? []) as RoomRow[];
+}
+
+export async function getIdentityFromSessionId(sessionId: string | null | undefined) {
   if (!sessionId) {
     return null;
   }
 
-  await connectToDatabase();
-  const session = await SessionModel.findOne({ token: sessionId }).lean();
+  const { data: session, error: sessionError } = await getSupabaseAdmin()
+    .from("fs_sessions")
+    .select("*")
+    .eq("token", sessionId)
+    .maybeSingle();
+  assertOk(sessionError);
+
   if (!session) {
     return null;
   }
 
-  const user = await UserModel.findById(session.userId).lean<UserDocument | null>();
-  if (!user) {
-    return null;
-  }
-
-  return toIdentity(user);
+  const user = await getUserRow((session as SessionRow).user_id);
+  return user ? toIdentity(user) : null;
 }
 
 export async function createAccount(input: {
@@ -253,7 +338,6 @@ export async function createAccount(input: {
   password: string;
   displayName?: string;
 }) {
-  await connectToDatabase();
   const username = normalizeUsername(input.username);
   const displayName = ensureDisplayName(input.displayName ?? input.username, input.username);
   const password = input.password.trim();
@@ -270,31 +354,44 @@ export async function createAccount(input: {
     throw new Error("Password must be at least 6 characters.");
   }
 
-  if (await UserModel.exists({ username })) {
+  const { data: existingUser, error: existingError } = await getSupabaseAdmin()
+    .from("fs_users")
+    .select("id")
+    .eq("username", username)
+    .maybeSingle();
+  assertOk(existingError);
+
+  if (existingUser) {
     throw new Error("That username is already taken.");
   }
 
-  const account = await UserModel.create({
-    _id: `acct_${randomUUID()}`,
-    username,
-    displayName,
-    role: "account",
-    passwordHash: hashPassword(password),
-  });
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_users")
+    .insert({
+      id: `acct_${randomUUID()}`,
+      username,
+      display_name: displayName,
+      role: "account",
+      password_hash: hashPassword(password),
+    })
+    .select("*")
+    .single();
+  assertOk(error);
 
-  return toIdentity(account);
+  return toIdentity(data as UserRow);
 }
 
 export async function signInAccount(input: { username: string; password: string }) {
-  await connectToDatabase();
   const username = normalizeUsername(input.username);
-  const account = await UserModel.findOne({ username }).lean<UserDocument | null>();
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_users")
+    .select("*")
+    .eq("username", username)
+    .maybeSingle();
+  assertOk(error);
 
-  if (!account) {
-    throw new Error("Invalid username or password.");
-  }
-
-  if (!account.passwordHash || !verifyPassword(input.password, account.passwordHash)) {
+  const account = data as UserRow | null;
+  if (!account || !account.password_hash || !verifyPassword(input.password, account.password_hash)) {
     throw new Error("Invalid username or password.");
   }
 
@@ -302,33 +399,40 @@ export async function signInAccount(input: { username: string; password: string 
 }
 
 export async function createGuestIdentity(input?: { displayName?: string }) {
-  await connectToDatabase();
   const displayName = ensureDisplayName(
     input?.displayName ?? `Guest ${randomBytes(2).toString("hex").toUpperCase()}`,
     "Guest",
   );
 
-  const guest = await UserModel.create({
-    _id: `guest_${randomUUID()}`,
-    role: "guest",
-    username: makeGuestUsername(displayName),
-    displayName,
-  });
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_users")
+    .insert({
+      id: `guest_${randomUUID()}`,
+      role: "guest",
+      username: makeGuestUsername(displayName),
+      display_name: displayName,
+    })
+    .select("*")
+    .single();
+  assertOk(error);
 
-  return toIdentity(guest);
+  return toIdentity(data as UserRow);
 }
 
 export async function createSession(identity: SessionUser) {
-  await connectToDatabase();
   const token = `sess_${randomUUID()}`;
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_sessions")
+    .insert({
+      id: token,
+      token,
+      user_id: identity.id,
+    })
+    .select("*")
+    .single();
+  assertOk(error);
 
-  const session = await SessionModel.create({
-    _id: token,
-    token,
-    userId: identity.id,
-  });
-
-  return session;
+  return data as SessionRow;
 }
 
 export async function clearSession(sessionId: string | null | undefined) {
@@ -336,76 +440,67 @@ export async function clearSession(sessionId: string | null | undefined) {
     return;
   }
 
-  await connectToDatabase();
-  const session = await SessionModel.findOne({ token: sessionId }).lean();
-
-  if (!session) {
+  const identity = await getIdentityFromSessionId(sessionId);
+  if (!identity) {
     return;
   }
 
-  await SessionModel.deleteMany({ userId: session.userId });
-  const user = await UserModel.findById(session.userId).lean<UserDocument | null>();
+  const supabase = getSupabaseAdmin();
+  const { error: sessionDeleteError } = await supabase
+    .from("fs_sessions")
+    .delete()
+    .eq("user_id", identity.id);
+  assertOk(sessionDeleteError);
 
-  if (!user || user.role !== "guest") {
+  if (identity.role !== "guest") {
     return;
   }
 
-  const affectedRooms = await RoomModel.find({
-    "members.userId": user._id,
-  });
+  const affectedRooms = (await listRooms()).filter((room) =>
+    room.members.some((member) => member.userId === identity.id),
+  );
 
-  const roomUpdates = affectedRooms.map(async (room) => {
-    room.members = room.members.filter((member) => member.userId !== user._id);
+  await Promise.all(
+    affectedRooms.map(async (room) => {
+      room.members = room.members.filter((member) => member.userId !== identity.id);
+      room.token_selections = room.token_selections.filter(
+        (selection) => selection.userId !== identity.id,
+      );
 
-    if (room.ownerId === user._id) {
-      const nextOwner = room.members[0];
-      if (nextOwner) {
-        room.ownerId = nextOwner.userId;
+      if (room.owner_id === identity.id) {
+        room.owner_id = room.members[0]?.userId ?? room.owner_id;
       }
-    }
 
-    if (room.members.length === 0) {
-      await RoomModel.deleteOne({ _id: room._id });
-      emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, {
-        roomId: room._id,
-      });
-      return;
-    }
+      if (room.umpire_id === identity.id) {
+        room.umpire_id = null;
+      }
 
-    await room.save();
-    await publishRoomChange(room._id);
-  });
+      if (room.members.length === 0) {
+        await deleteRoom(room.id);
+        return;
+      }
 
-  await Promise.all(roomUpdates);
-  await InvitationModel.deleteMany({
-    $or: [{ createdByUserId: user._id }, { inviteeUserId: user._id }],
-  });
-  await UserModel.deleteOne({ _id: user._id });
-  await publishPublicRoomsChange();
-}
+      await saveRoom(room);
+    }),
+  );
 
-async function requireRoom(roomId: string) {
-  await connectToDatabase();
-  const room = await RoomModel.findById(roomId);
-  if (!room) {
-    throw new Error("Room not found.");
-  }
-  return room;
+  await supabase.from("fs_invitations").delete().eq("created_by_user_id", identity.id);
+  await supabase.from("fs_invitations").delete().eq("invitee_user_id", identity.id);
+  await supabase.from("fs_users").delete().eq("id", identity.id);
 }
 
 export async function listPublicRooms() {
-  await connectToDatabase();
-  const rooms = await RoomModel.find({ visibility: "public" })
-    .sort({ createdAt: -1 })
-    .lean<RoomDocument[]>();
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_rooms")
+    .select("*")
+    .eq("visibility", "public")
+    .order("created_at", { ascending: false });
+  assertOk(error);
 
-  return rooms.map(sanitizeRoom);
+  return ((data ?? []) as RoomRow[]).map(sanitizeRoom);
 }
 
-export async function getRoomById(
-  roomId: string,
-  identity?: SessionUser | null,
-) {
+export async function getRoomById(roomId: string, identity?: SessionUser | null) {
   const room = await requireRoom(roomId);
 
   if (
@@ -415,7 +510,45 @@ export async function getRoomById(
     throw new Error("This room is private.");
   }
 
-  return sanitizeRoom(room.toObject());
+  return sanitizeRoom(room);
+}
+
+async function ensureUserCanEnterRoom(identity: SessionUser, targetRoomId?: string) {
+  const activeRooms = (await listRooms()).filter(
+    (room) =>
+      room.id !== targetRoomId &&
+      ["lobby", "playing"].includes(room.game_status) &&
+      room.members.some((member) => member.userId === identity.id),
+  );
+
+  const playingRoom = activeRooms.find((room) => room.game_status === "playing");
+  if (playingRoom) {
+    throw new Error("Leave your current game before joining another room.");
+  }
+
+  await Promise.all(
+    activeRooms.map(async (room) => {
+      room.members = room.members.filter((member) => member.userId !== identity.id);
+      room.token_selections = room.token_selections.filter(
+        (selection) => selection.userId !== identity.id,
+      );
+
+      if (room.owner_id === identity.id) {
+        room.owner_id = room.members[0]?.userId ?? room.owner_id;
+      }
+
+      if (room.umpire_id === identity.id) {
+        room.umpire_id = null;
+      }
+
+      if (room.members.length === 0) {
+        await deleteRoom(room.id);
+        return;
+      }
+
+      await saveRoom(room);
+    }),
+  );
 }
 
 export async function createRoom(input: {
@@ -423,7 +556,6 @@ export async function createRoom(input: {
   name: string;
   visibility: RoomVisibility;
 }) {
-  await connectToDatabase();
   const trimmedName = normalizeDisplayName(input.name);
 
   if (trimmedName.length < 3) {
@@ -432,27 +564,33 @@ export async function createRoom(input: {
 
   await ensureUserCanEnterRoom(input.owner);
 
-  const room = await RoomModel.create({
-    _id: `room_${randomUUID()}`,
-    code: await makeRoomCode(),
-    name: trimmedName,
-    visibility: input.visibility,
-    ownerId: input.owner.id,
-    members: [
-      {
-        userId: input.owner.id,
-        username: input.owner.username,
-        displayName: input.owner.displayName,
-        role: input.owner.role,
-        joinedAt: new Date(),
-      },
-    ],
-  });
+  const now = new Date().toISOString();
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_rooms")
+    .insert({
+      id: `room_${randomUUID()}`,
+      code: await makeRoomCode(),
+      name: trimmedName,
+      visibility: input.visibility,
+      owner_id: input.owner.id,
+      members: [
+        {
+          userId: input.owner.id,
+          username: input.owner.username,
+          displayName: input.owner.displayName,
+          role: input.owner.role,
+          joinedAt: now,
+        },
+      ],
+      token_selections: [],
+      game_deck: [],
+      game_discard: [],
+    })
+    .select("*")
+    .single();
+  assertOk(error);
 
-  const result = sanitizeRoom(room.toObject());
-  await publishRoomChange(room._id);
-  await publishPublicRoomsChange();
-  return result;
+  return sanitizeRoom(data as RoomRow);
 }
 
 export async function joinRoom(input: {
@@ -466,76 +604,26 @@ export async function joinRoom(input: {
     throw new Error("This room is private. Use an invitation link.");
   }
 
-  if (room.gameStatus !== "lobby") {
+  if (room.game_status !== "lobby") {
     throw new Error("This game has already started. You can spectate instead.");
   }
 
   const alreadyMember = room.members.some((member) => member.userId === input.identity.id);
   if (!alreadyMember) {
-    await ensureUserCanEnterRoom(input.identity, room._id);
+    await ensureUserCanEnterRoom(input.identity, room.id);
     room.members.push({
       userId: input.identity.id,
       username: input.identity.username,
       displayName: input.identity.displayName,
       role: input.identity.role,
-      joinedAt: new Date(),
+      joinedAt: new Date().toISOString(),
     });
-    await room.save();
   }
 
-  const result = sanitizeRoom(room.toObject());
-  await publishRoomChange(room._id);
-  await publishPublicRoomsChange();
-  return result;
+  return await saveRoom(room);
 }
 
-async function ensureUserCanEnterRoom(identity: SessionUser, targetRoomId?: string) {
-  const activeRooms = await RoomModel.find({
-    _id: targetRoomId ? { $ne: targetRoomId } : { $exists: true },
-    "members.userId": identity.id,
-    gameStatus: { $in: ["lobby", "playing"] },
-  });
-
-  const playingRoom = activeRooms.find((room) => room.gameStatus === "playing");
-  if (playingRoom) {
-    throw new Error("Leave your current game before joining another room.");
-  }
-
-  await Promise.all(
-    activeRooms.map(async (room) => {
-      room.members = room.members.filter((member) => member.userId !== identity.id);
-      room.tokenSelections = room.tokenSelections.filter(
-        (selection) => selection.userId !== identity.id,
-      );
-
-      if (room.ownerId === identity.id) {
-        const nextOwner = room.members[0];
-        if (nextOwner) {
-          room.ownerId = nextOwner.userId;
-        }
-      }
-
-      if (room.umpireId === identity.id) {
-        room.umpireId = null;
-      }
-
-      if (room.members.length === 0) {
-        await RoomModel.deleteOne({ _id: room._id });
-        emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
-        return;
-      }
-
-      await room.save();
-      await publishRoomChange(room._id);
-    }),
-  );
-
-  if (activeRooms.length > 0) {
-    await publishPublicRoomsChange();
-  }
-}
-
-function requireRoomMember(room: RoomDocument, identity: SessionUser) {
+function requireRoomMember(room: RoomRow, identity: SessionUser) {
   const member = room.members.find((roomMember) => roomMember.userId === identity.id);
   if (!member) {
     throw new Error("Join this room before opening the lobby.");
@@ -544,16 +632,46 @@ function requireRoomMember(room: RoomDocument, identity: SessionUser) {
   return member;
 }
 
-function canManageRoom(room: RoomDocument, identity: SessionUser) {
-  return room.ownerId === identity.id || room.umpireId === identity.id;
+function canManageRoom(room: RoomRow, identity: SessionUser) {
+  return room.owner_id === identity.id || room.umpire_id === identity.id;
 }
 
-function dealCardsFrom(deck: RoomDocument["gameDeck"], count: number) {
+function dealCardsFrom(deck: HolySpiritCard[], count: number) {
   return deck.splice(0, count);
 }
 
-async function awardLeaderboardWin(room: RoomDocument, winner: Player) {
-  if (room.leaderboardAwarded) {
+async function upsertLeaderboard(member: {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: SessionUser["role"];
+}, increment: { gamesPlayed: number; wins?: number; losses?: number }) {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("fs_leaderboard_entries")
+    .select("*")
+    .eq("user_id", member.userId)
+    .maybeSingle();
+  assertOk(error);
+
+  const existing = data as LeaderboardEntryRow | null;
+  const { error: upsertError } = await supabase
+    .from("fs_leaderboard_entries")
+    .upsert({
+      user_id: member.userId,
+      username: member.username,
+      display_name: member.displayName,
+      role: member.role,
+      games_played: (existing?.games_played ?? 0) + increment.gamesPlayed,
+      wins: (existing?.wins ?? 0) + (increment.wins ?? 0),
+      losses: (existing?.losses ?? 0) + (increment.losses ?? 0),
+      updated_at: new Date().toISOString(),
+    });
+  assertOk(upsertError);
+}
+
+async function awardLeaderboardWin(room: RoomRow, winner: Player) {
+  if (room.leaderboard_awarded) {
     return;
   }
 
@@ -563,46 +681,15 @@ async function awardLeaderboardWin(room: RoomDocument, winner: Player) {
   }
 
   const losers = room.members.filter((roomMember) =>
-    room.gameState?.players.some((player) => player.id === roomMember.userId && player.id !== winner.id),
+    room.game_state?.players.some((player) => player.id === roomMember.userId && player.id !== winner.id),
   );
 
-  await LeaderboardEntryModel.findOneAndUpdate(
-    { userId: member.userId },
-    {
-      $set: {
-        _id: `leaderboard_${member.userId}`,
-        userId: member.userId,
-        username: member.username,
-        displayName: member.displayName,
-        role: member.role,
-        updatedAt: new Date(),
-      },
-      $inc: { gamesPlayed: 1, wins: 1 },
-    },
-    { new: true, upsert: true },
-  );
-
+  await upsertLeaderboard(member, { gamesPlayed: 1, wins: 1 });
   await Promise.all(
-    losers.map((loser) =>
-      LeaderboardEntryModel.findOneAndUpdate(
-        { userId: loser.userId },
-        {
-          $set: {
-            _id: `leaderboard_${loser.userId}`,
-            userId: loser.userId,
-            username: loser.username,
-            displayName: loser.displayName,
-            role: loser.role,
-            updatedAt: new Date(),
-          },
-          $inc: { gamesPlayed: 1, losses: 1 },
-        },
-        { new: true, upsert: true },
-      ),
-    ),
+    losers.map((loser) => upsertLeaderboard(loser, { gamesPlayed: 1, losses: 1 })),
   );
 
-  room.leaderboardAwarded = true;
+  room.leaderboard_awarded = true;
 }
 
 async function awardLeaderboardLoss(member: {
@@ -611,25 +698,11 @@ async function awardLeaderboardLoss(member: {
   displayName: string;
   role: SessionUser["role"];
 }) {
-  await LeaderboardEntryModel.findOneAndUpdate(
-    { userId: member.userId },
-    {
-      $set: {
-        _id: `leaderboard_${member.userId}`,
-        userId: member.userId,
-        username: member.username,
-        displayName: member.displayName,
-        role: member.role,
-        updatedAt: new Date(),
-      },
-      $inc: { gamesPlayed: 1, losses: 1 },
-    },
-    { new: true, upsert: true },
-  );
+  await upsertLeaderboard(member, { gamesPlayed: 1, losses: 1 });
 }
 
 async function resolveOnlineLanding(
-  room: RoomDocument,
+  room: RoomRow,
   state: OnlineGameState,
   playerId: string,
   tile: number,
@@ -658,8 +731,8 @@ async function resolveOnlineLanding(
       },
     };
 
-    room.gameStatus = "won";
-    room.winnerId = playerId;
+    room.game_status = "won";
+    room.winner_id = playerId;
     await awardLeaderboardWin(room, player);
     return nextState;
   }
@@ -726,14 +799,6 @@ async function resolveOnlineLanding(
   };
 }
 
-async function saveOnlineRoomChange(room: HydratedDocument<RoomDocument>) {
-  await room.save();
-  const result = sanitizeRoom(room.toObject());
-  await publishRoomChange(room._id);
-  await publishPublicRoomsChange();
-  return result;
-}
-
 export async function selectRoomToken(input: {
   roomId: string;
   identity: SessionUser;
@@ -742,7 +807,7 @@ export async function selectRoomToken(input: {
   const room = await requireRoom(input.roomId);
   requireRoomMember(room, input.identity);
 
-  if (room.gameStatus !== "lobby") {
+  if (room.game_status !== "lobby") {
     throw new Error("Token colors can only be changed before the game starts.");
   }
 
@@ -750,25 +815,24 @@ export async function selectRoomToken(input: {
     throw new Error("Choose a valid token color.");
   }
 
-  const selectedByOtherUser = room.tokenSelections.some(
-    (selection) =>
-      selection.color === input.color && selection.userId !== input.identity.id,
+  const selectedByOtherUser = room.token_selections.some(
+    (selection) => selection.color === input.color && selection.userId !== input.identity.id,
   );
 
   if (selectedByOtherUser) {
     throw new Error("That token color has already been selected.");
   }
 
-  room.tokenSelections = room.tokenSelections.filter(
+  room.token_selections = room.token_selections.filter(
     (selection) => selection.userId !== input.identity.id,
   );
-  room.tokenSelections.push({
+  room.token_selections.push({
     userId: input.identity.id,
     color: input.color,
-    selectedAt: new Date(),
+    selectedAt: new Date().toISOString(),
   });
 
-  return await saveOnlineRoomChange(room);
+  return await saveRoom(room);
 }
 
 export async function assignRoomUmpire(input: {
@@ -779,19 +843,16 @@ export async function assignRoomUmpire(input: {
   const room = await requireRoom(input.roomId);
   requireRoomMember(room, input.identity);
 
-  if (room.ownerId !== input.identity.id) {
+  if (room.owner_id !== input.identity.id) {
     throw new Error("Only the room owner can assign an umpire.");
   }
 
-  if (
-    input.umpireUserId &&
-    !room.members.some((member) => member.userId === input.umpireUserId)
-  ) {
+  if (input.umpireUserId && !room.members.some((member) => member.userId === input.umpireUserId)) {
     throw new Error("Choose a current room member as umpire.");
   }
 
-  room.umpireId = input.umpireUserId;
-  return await saveOnlineRoomChange(room);
+  room.umpire_id = input.umpireUserId;
+  return await saveRoom(room);
 }
 
 export async function startOnlineRoomGame(input: {
@@ -805,16 +866,16 @@ export async function startOnlineRoomGame(input: {
     throw new Error("Only the room owner or assigned umpire can start the game.");
   }
 
-  if (room.gameStatus !== "lobby") {
+  if (room.game_status !== "lobby") {
     throw new Error("This game has already started.");
   }
 
-  if (room.tokenSelections.length < 2) {
+  if (room.token_selections.length < 2) {
     throw new Error("At least 2 players must choose token colors before starting.");
   }
 
   const deck = createDeck();
-  const players = room.tokenSelections
+  const players = room.token_selections
     .map((selection): Player | null => {
       const member = room.members.find((candidate) => candidate.userId === selection.userId);
       if (!member) {
@@ -836,12 +897,12 @@ export async function startOnlineRoomGame(input: {
     throw new Error("At least 2 selected players must still be in the room.");
   }
 
-  room.gameStatus = "playing";
-  room.winnerId = null;
-  room.leaderboardAwarded = false;
-  room.gameDeck = deck;
-  room.gameDiscard = [];
-  room.gameState = {
+  room.game_status = "playing";
+  room.winner_id = null;
+  room.leaderboard_awarded = false;
+  room.game_deck = deck;
+  room.game_discard = [];
+  room.game_state = {
     phase: "playing",
     players,
     currentPlayerIndex: 0,
@@ -852,7 +913,7 @@ export async function startOnlineRoomGame(input: {
     animatingToken: null,
   };
 
-  return await saveOnlineRoomChange(room);
+  return await saveRoom(room);
 }
 
 export async function rollOnlineRoomDice(input: {
@@ -862,8 +923,8 @@ export async function rollOnlineRoomDice(input: {
   const room = await requireRoom(input.roomId);
   requireRoomMember(room, input.identity);
 
-  const state = room.gameState;
-  if (!state || room.gameStatus !== "playing" || state.phase !== "playing") {
+  const state = room.game_state;
+  if (!state || room.game_status !== "playing" || state.phase !== "playing") {
     throw new Error("Start the game before rolling.");
   }
 
@@ -880,7 +941,7 @@ export async function rollOnlineRoomDice(input: {
   const targetTile = player.position + rolled;
 
   if (targetTile > TOTAL_TILES) {
-    room.gameState = {
+    room.game_state = {
       ...state,
       diceValue: rolled,
       currentPlayerIndex: (state.currentPlayerIndex + 1) % state.players.length,
@@ -894,19 +955,24 @@ export async function rollOnlineRoomDice(input: {
       },
     };
   } else {
-    room.gameState = await resolveOnlineLanding(room, {
-      ...state,
-      diceValue: rolled,
-      lastEvent: {
-        type: "dice_rolled",
-        playerName: player.name,
-        playerColor: player.color,
-        message: `${player.name} rolled ${rolled}.`,
+    room.game_state = await resolveOnlineLanding(
+      room,
+      {
+        ...state,
+        diceValue: rolled,
+        lastEvent: {
+          type: "dice_rolled",
+          playerName: player.name,
+          playerColor: player.color,
+          message: `${player.name} rolled ${rolled}.`,
+        },
       },
-    }, player.id, targetTile);
+      player.id,
+      targetTile,
+    );
   }
 
-  return await saveOnlineRoomChange(room);
+  return await saveRoom(room);
 }
 
 export async function playOnlineRoomCard(input: {
@@ -917,8 +983,8 @@ export async function playOnlineRoomCard(input: {
   const room = await requireRoom(input.roomId);
   requireRoomMember(room, input.identity);
 
-  const state = room.gameState;
-  if (!state || room.gameStatus !== "playing" || state.phase !== "playing") {
+  const state = room.game_state;
+  if (!state || room.game_status !== "playing" || state.phase !== "playing") {
     throw new Error("Start the game before using cards.");
   }
 
@@ -936,14 +1002,14 @@ export async function playOnlineRoomCard(input: {
     throw new Error("That card is not in your hand.");
   }
 
-  room.gameDiscard.push(card);
-  const [newCard] = dealCardsFrom(room.gameDeck, 1);
+  room.game_discard.push(card);
+  const [newCard] = dealCardsFrom(room.game_deck, 1);
   const nextCards = player.cards
     .filter((candidate) => candidate.id !== input.cardId)
     .concat(newCard ? [newCard] : []);
   const targetTile = Math.min(player.position + card.steps, TOTAL_TILES);
 
-  room.gameState = await resolveOnlineLanding(
+  room.game_state = await resolveOnlineLanding(
     room,
     {
       ...state,
@@ -964,7 +1030,7 @@ export async function playOnlineRoomCard(input: {
     targetTile,
   );
 
-  return await saveOnlineRoomChange(room);
+  return await saveRoom(room);
 }
 
 export async function leaveRoom(input: {
@@ -974,27 +1040,24 @@ export async function leaveRoom(input: {
   const room = await requireRoom(input.roomId);
   const member = requireRoomMember(room, input.identity);
   const wasPlaying =
-    room.gameStatus === "playing" &&
-    Boolean(room.gameState?.players.some((player) => player.id === input.identity.id));
+    room.game_status === "playing" &&
+    Boolean(room.game_state?.players.some((player) => player.id === input.identity.id));
 
   if (wasPlaying) {
     await awardLeaderboardLoss(member);
-    room.gameState = room.gameState
+    room.game_state = room.game_state
       ? {
-          ...room.gameState,
-          players: room.gameState.players.filter(
-            (player) => player.id !== input.identity.id,
-          ),
+          ...room.game_state,
+          players: room.game_state.players.filter((player) => player.id !== input.identity.id),
           currentPlayerIndex: Math.min(
-            room.gameState.currentPlayerIndex,
-            Math.max(0, room.gameState.players.length - 2),
+            room.game_state.currentPlayerIndex,
+            Math.max(0, room.game_state.players.length - 2),
           ),
           lastEvent: {
             type: "moved",
             playerName: member.displayName,
             playerColor:
-              room.gameState.players.find((player) => player.id === input.identity.id)
-                ?.color ?? "red",
+              room.game_state.players.find((player) => player.id === input.identity.id)?.color ?? "red",
             message: `${member.displayName} left the game and took a loss.`,
           },
         }
@@ -1002,37 +1065,29 @@ export async function leaveRoom(input: {
   }
 
   room.members = room.members.filter((roomMember) => roomMember.userId !== input.identity.id);
-  room.tokenSelections = room.tokenSelections.filter(
+  room.token_selections = room.token_selections.filter(
     (selection) => selection.userId !== input.identity.id,
   );
 
-  if (room.ownerId === input.identity.id) {
-    const nextOwner = room.members[0];
-    if (nextOwner) {
-      room.ownerId = nextOwner.userId;
-    }
+  if (room.owner_id === input.identity.id) {
+    room.owner_id = room.members[0]?.userId ?? room.owner_id;
   }
 
-  if (room.umpireId === input.identity.id) {
-    room.umpireId = null;
+  if (room.umpire_id === input.identity.id) {
+    room.umpire_id = null;
   }
 
   if (room.members.length === 0) {
-    await RoomModel.deleteOne({ _id: room._id });
-    emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
-    await publishPublicRoomsChange();
+    await deleteRoom(room.id);
     return null;
   }
 
-  if (
-    room.gameStatus === "playing" &&
-    (room.gameState?.players.length ?? 0) < 2
-  ) {
-    room.gameStatus = "won";
-    room.gameState = room.gameState ? { ...room.gameState, phase: "won" } : null;
+  if (room.game_status === "playing" && (room.game_state?.players.length ?? 0) < 2) {
+    room.game_status = "won";
+    room.game_state = room.game_state ? { ...room.game_state, phase: "won" } : null;
   }
 
-  return await saveOnlineRoomChange(room);
+  return await saveRoom(room);
 }
 
 export async function closeRoom(input: {
@@ -1042,42 +1097,42 @@ export async function closeRoom(input: {
   const room = await requireRoom(input.roomId);
   requireRoomMember(room, input.identity);
 
-  if (room.ownerId !== input.identity.id) {
+  if (room.owner_id !== input.identity.id) {
     throw new Error("Only the room owner can close this room.");
   }
 
-  if (room.gameStatus === "playing") {
+  if (room.game_status === "playing") {
     await Promise.all(
       room.members
-        .filter((member) =>
-          room.gameState?.players.some((player) => player.id === member.userId),
-        )
+        .filter((member) => room.game_state?.players.some((player) => player.id === member.userId))
         .map((member) => awardLeaderboardLoss(member)),
     );
   }
 
-  await RoomModel.deleteOne({ _id: room._id });
-  emitRealtimeEvent(REALTIME_EVENTS.ROOM_CLOSED, { roomId: room._id });
-  await publishPublicRoomsChange();
+  await deleteRoom(room.id);
 }
 
 export async function listLeaderboard() {
-  await connectToDatabase();
-  const leaderboard = await LeaderboardEntryModel.find()
-    .sort({ wins: -1, updatedAt: 1 })
-    .limit(50)
-    .lean<LeaderboardEntryDocument[]>();
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_leaderboard_entries")
+    .select("*")
+    .order("wins", { ascending: false })
+    .order("updated_at", { ascending: true })
+    .limit(50);
+  assertOk(error);
 
-  return leaderboard.map(sanitizeLeaderboardEntry);
+  return ((data ?? []) as LeaderboardEntryRow[]).map(sanitizeLeaderboardEntry);
 }
 
 export async function getUserLeaderboardStats(identity: SessionUser) {
-  await connectToDatabase();
-  const stats = await LeaderboardEntryModel.findOne({
-    userId: identity.id,
-  }).lean<LeaderboardEntryDocument | null>();
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_leaderboard_entries")
+    .select("*")
+    .eq("user_id", identity.id)
+    .maybeSingle();
+  assertOk(error);
 
-  if (!stats) {
+  if (!data) {
     return {
       userId: identity.id,
       username: identity.username,
@@ -1090,7 +1145,7 @@ export async function getUserLeaderboardStats(identity: SessionUser) {
     } satisfies LeaderboardEntry;
   }
 
-  return sanitizeLeaderboardEntry(stats);
+  return sanitizeLeaderboardEntry(data as LeaderboardEntryRow);
 }
 
 export async function createInvitation(input: {
@@ -1098,7 +1153,6 @@ export async function createInvitation(input: {
   createdBy: SessionUser;
   inviteeUsername?: string;
 }) {
-  await connectToDatabase();
   const room = await requireRoom(input.roomId);
 
   if (!room.members.some((member) => member.userId === input.createdBy.id)) {
@@ -1108,67 +1162,79 @@ export async function createInvitation(input: {
   let inviteeUserId: string | null = null;
 
   if (input.inviteeUsername) {
-    const invitedUser = await UserModel.findOne({
-      username: normalizeUsername(input.inviteeUsername),
-    }).lean<UserDocument | null>();
+    const { data, error } = await getSupabaseAdmin()
+      .from("fs_users")
+      .select("*")
+      .eq("username", normalizeUsername(input.inviteeUsername))
+      .maybeSingle();
+    assertOk(error);
 
-    if (!invitedUser) {
+    if (!data) {
       throw new Error("The invited account does not exist.");
     }
 
-    inviteeUserId = invitedUser._id;
+    inviteeUserId = (data as UserRow).id;
   }
 
-  const invite = await InvitationModel.create({
-    _id: `invite_${randomUUID()}`,
-    token: randomToken(),
-    roomId: room._id,
-    createdByUserId: input.createdBy.id,
-    inviteeUserId,
-    acceptedAt: null,
-  });
+  const { data, error } = await getSupabaseAdmin()
+    .from("fs_invitations")
+    .insert({
+      id: `invite_${randomUUID()}`,
+      token: randomToken(),
+      room_id: room.id,
+      created_by_user_id: input.createdBy.id,
+      invitee_user_id: inviteeUserId,
+      accepted_at: null,
+    })
+    .select("*")
+    .single();
+  assertOk(error);
 
-  const sanitizedInvite = sanitizeInvite(invite.toObject());
-  emitRealtimeEvent(REALTIME_EVENTS.INVITATION_CREATED, {
-    roomId: room._id,
-    invitation: sanitizedInvite,
-  });
-
-  return sanitizedInvite;
+  return sanitizeInvite(data as InvitationRow);
 }
 
 export async function acceptInvitation(input: {
   token: string;
   identity: SessionUser;
 }) {
-  await connectToDatabase();
-  const invite = await InvitationModel.findOne({
-    token: input.token,
-  });
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("fs_invitations")
+    .select("*")
+    .eq("token", input.token)
+    .maybeSingle();
+  assertOk(error);
 
+  const invite = data as InvitationRow | null;
   if (!invite) {
     throw new Error("Invitation not found.");
   }
 
-  if (invite.acceptedAt) {
+  if (invite.accepted_at) {
     throw new Error("Invitation has already been used.");
   }
 
-  if (invite.inviteeUserId && invite.inviteeUserId !== input.identity.id) {
+  if (invite.invitee_user_id && invite.invitee_user_id !== input.identity.id) {
     throw new Error("This invitation is meant for a different account.");
   }
 
-  invite.acceptedAt = new Date();
-  await invite.save();
+  const acceptedAt = new Date().toISOString();
+  const { data: updatedInvite, error: updateError } = await supabase
+    .from("fs_invitations")
+    .update({ accepted_at: acceptedAt })
+    .eq("id", invite.id)
+    .select("*")
+    .single();
+  assertOk(updateError);
 
   const room = await joinRoom({
-    roomId: invite.roomId,
+    roomId: invite.room_id,
     identity: input.identity,
     allowPrivate: true,
   });
 
   return {
-    invitation: sanitizeInvite(invite.toObject()),
+    invitation: sanitizeInvite(updatedInvite as InvitationRow),
     room,
   };
 }
@@ -1182,8 +1248,7 @@ export async function getUserFingerprint(identity: SessionUser) {
 }
 
 export async function getUserById(userId: string) {
-  await connectToDatabase();
-  const user = await UserModel.findById(userId).lean<UserDocument | null>();
+  const user = await getUserRow(userId);
   return user ? toIdentity(user) : null;
 }
 
@@ -1193,5 +1258,5 @@ export async function getSessionUserByToken(sessionToken: string | null | undefi
 
 export async function getRoomWatcherState(roomId: string) {
   const room = await requireRoom(roomId);
-  return sanitizeRoom(room.toObject());
+  return sanitizeRoom(room);
 }

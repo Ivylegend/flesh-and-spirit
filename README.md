@@ -4,7 +4,7 @@ Flesh & Spirit is a gospel-themed multiplayer board game built with Next.js.
 It now supports both:
 
 - local play on one device
-- online play with accounts or guests, public/private rooms, invite links, MongoDB persistence, and live lobby updates over WebSockets
+- online play with accounts or guests, public/private rooms, invite links, Supabase persistence, and live lobby updates over Supabase Realtime
 
 ## Stack
 
@@ -12,8 +12,8 @@ It now supports both:
 - React 19
 - TypeScript
 - Tailwind CSS
-- MongoDB with Mongoose
-- Socket.IO
+- Supabase Postgres
+- Supabase Realtime
 - React Query
 
 ## Environment
@@ -21,8 +21,9 @@ It now supports both:
 Create a `.env.local` file:
 
 ```sh
-MONGODB_URI=mongodb://127.0.0.1:27017
-MONGODB_DB=flesh_spirit
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
 
 You can also copy values from [.env.example](/Users/mac/Desktop/flesh-spirit/.env.example).
@@ -34,7 +35,7 @@ pnpm install
 pnpm dev
 ```
 
-The app now runs through a custom Node server in [server.mjs](/Users/mac/Desktop/flesh-spirit/server.mjs) so Next.js and Socket.IO share the same process.
+Run [supabase/schema.sql](/Users/mac/Desktop/flesh-spirit/supabase/schema.sql) in your Supabase SQL editor before starting online play.
 
 ## Features
 
@@ -43,4 +44,4 @@ The app now runs through a custom Node server in [server.mjs](/Users/mac/Desktop
 - create public or private rooms
 - join public rooms
 - invite by username or shareable link
-- live lobby room updates through WebSockets
+- live lobby room updates through Supabase Realtime

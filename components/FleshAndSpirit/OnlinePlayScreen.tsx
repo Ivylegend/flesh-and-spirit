@@ -11,7 +11,6 @@ import {
   useState,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { io, type Socket } from "socket.io-client";
 import {
   Copy,
   DoorOpen,
@@ -39,6 +38,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { getSupabaseBrowserClient } from "@/lib/supabase-client";
 import type {
   AcceptInvitationResponse,
   ApiResponse,
@@ -134,7 +134,6 @@ export default function OnlinePlayScreen({
   const router = useRouter();
   const queryClient = useQueryClient();
   const activeLobbyRef = useRef<HTMLDivElement | null>(null);
-  const socketRef = useRef<Socket | null>(null);
   const handledInviteRef = useRef<string | null>(inviteToken ?? null);
 
   const [authView, setAuthView] = useState<AuthView>("guest");
@@ -217,19 +216,8 @@ export default function OnlinePlayScreen({
     });
   };
 
-  const reportSocketActivity = useEffectEvent((message: string) => {
+  const reportRealtimeActivity = useEffectEvent((message: string) => {
     appendActivity(message);
-  });
-
-  const updateRoomFromSocket = useEffectEvent((room: RoomSummary) => {
-    startTransition(() => {
-      setLiveRoom(room);
-      queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
-    });
-  });
-
-  const updatePublicRoomsFromSocket = useEffectEvent((rooms: RoomSummary[]) => {
-    queryClient.setQueryData<PublicRoomsResponse>(["public-rooms"], { rooms });
   });
 
   const cacheRoom = (room: RoomSummary) => {
@@ -523,76 +511,40 @@ export default function OnlinePlayScreen({
 
   useEffect(() => {
     if (!user) {
-      socketRef.current?.disconnect();
-      socketRef.current = null;
       return;
     }
 
-    const shouldUseSocket =
-      typeof window !== "undefined" &&
-      (window.location.hostname === "localhost" ||
-        window.location.hostname === "127.0.0.1");
-
-    if (!shouldUseSocket) {
-      reportSocketActivity("Live updates are using refresh polling on this deployment.");
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      reportRealtimeActivity("Live updates are using refresh polling until Supabase is configured.");
       return;
     }
 
-    const socket = io({
-      path: "/socket.io",
-      addTrailingSlash: false,
-      withCredentials: true,
-    });
+    const publicRoomsChannel = supabase
+      .channel("fs-public-rooms")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "fs_rooms" },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+        },
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          setSocketState("connected");
+          reportRealtimeActivity("Supabase live room connection established.");
+        }
 
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      setSocketState("connected");
-      reportSocketActivity("Live room connection established.");
-    });
-
-    socket.on("disconnect", () => {
-      setSocketState("idle");
-    });
-
-    socket.on("connect_error", (error) => {
-      setSocketState("error");
-      reportSocketActivity(error.message || "Live connection failed.");
-    });
-
-    socket.on("room:snapshot", (room: RoomSummary) => {
-      updateRoomFromSocket(room);
-    });
-
-    socket.on("room:updated", (room: RoomSummary) => {
-      updateRoomFromSocket(room);
-      reportSocketActivity(`Room "${room.name}" updated live.`);
-    });
-
-    socket.on("room:closed", ({ roomId }: { roomId: string }) => {
-      startTransition(() => {
-        setLiveRoom((current) => (current?.id === roomId ? null : current));
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setSocketState("error");
+          reportRealtimeActivity("Supabase live connection failed. Polling will keep trying.");
+        }
       });
-      if (currentRoomId === roomId) {
-        router.replace("/online");
-      }
-      reportSocketActivity("The active room was closed.");
-      void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
-    });
-
-    socket.on("rooms:public", (rooms: RoomSummary[]) => {
-      updatePublicRoomsFromSocket(rooms);
-    });
-
-    socket.on("invitation:created", () => {
-      reportSocketActivity("A room invite was generated.");
-    });
 
     return () => {
-      socket.disconnect();
-      socketRef.current = null;
+      void supabase.removeChannel(publicRoomsChannel);
     };
-  }, [currentRoomId, inviteToken, queryClient, router, user]);
+  }, [queryClient, user]);
 
   useEffect(() => {
     if (!currentRoomId || socketState === "connected") {
@@ -608,23 +560,54 @@ export default function OnlinePlayScreen({
   }, [currentRoomId, queryClient, socketState]);
 
   useEffect(() => {
-    if (!socketRef.current || !currentRoomId || socketState !== "connected") {
+    if (!currentRoomId || !user) {
       return;
     }
 
-    socketRef.current.emit("room:watch", currentRoomId, (ack?: {
-      ok: boolean;
-      error?: string;
-    }) => {
-      if (!ack?.ok && ack?.error) {
-        toast.error(ack.error);
-      }
-    });
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      return;
+    }
+
+    const roomChannel = supabase
+      .channel(`fs-room-${currentRoomId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "fs_rooms",
+          filter: `id=eq.${currentRoomId}`,
+        },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["room", currentRoomId] });
+          void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+          reportRealtimeActivity("Room updated live.");
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "fs_rooms",
+          filter: `id=eq.${currentRoomId}`,
+        },
+        () => {
+          startTransition(() => {
+            setLiveRoom(null);
+          });
+          router.replace("/online");
+          void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+          reportRealtimeActivity("The active room was closed.");
+        },
+      )
+      .subscribe();
 
     return () => {
-      socketRef.current?.emit("room:leave", currentRoomId);
+      void supabase.removeChannel(roomChannel);
     };
-  }, [currentRoomId, socketState]);
+  }, [currentRoomId, queryClient, router, user]);
 
   useEffect(() => {
     if (!user || !inviteToken || handledInviteRef.current === inviteToken) {
@@ -1054,7 +1037,7 @@ export default function OnlinePlayScreen({
               Rooms, guests, invites, and live joins.
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
-              Persisted in MongoDB and synced over WebSockets so the lobby stays
+              Persisted in Supabase and synced with Realtime so the lobby stays
               current while players come and go.
             </p>
           </div>
@@ -1214,7 +1197,14 @@ export default function OnlinePlayScreen({
                       Loading rooms...
                     </div>
                   )}
-                  {!publicRoomsQuery.isLoading && joinableRooms.length === 0 && (
+                  {publicRoomsQuery.isError && (
+                    <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-6 text-sm text-red-700">
+                      {publicRoomsQuery.error instanceof Error
+                        ? publicRoomsQuery.error.message
+                        : "Unable to load rooms."}
+                    </div>
+                  )}
+                  {!publicRoomsQuery.isLoading && !publicRoomsQuery.isError && joinableRooms.length === 0 && (
                     <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
                       No open lobbies match this filter yet.
                     </div>
@@ -1289,7 +1279,7 @@ export default function OnlinePlayScreen({
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                {spectateRooms.length === 0 && (
+                {!publicRoomsQuery.isError && spectateRooms.length === 0 && (
                   <div className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/80 px-4 py-6 text-sm text-stone-500">
                     No ongoing public games match this filter.
                   </div>
@@ -1428,7 +1418,7 @@ export default function OnlinePlayScreen({
                       Active Lobby
                     </CardTitle>
                     <CardDescription>
-                      Live room membership comes in over WebSockets.
+                      Live room membership comes in through Supabase Realtime.
                     </CardDescription>
                   </div>
                   <span
