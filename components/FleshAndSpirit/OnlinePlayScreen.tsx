@@ -186,7 +186,7 @@ export default function OnlinePlayScreen({
   const user = sessionQuery.data?.user ?? null;
   const canCreateRoom = Boolean(user) && roomName.trim().length >= 3;
   const activeRoom =
-    liveRoom && liveRoom.id === currentRoomId ? liveRoom : roomQuery.data?.room ?? null;
+    roomQuery.data?.room ?? (liveRoom && liveRoom.id === currentRoomId ? liveRoom : null);
 
   const myStatsQuery = useQuery({
     queryKey: ["leaderboard", "me"],
@@ -218,6 +218,26 @@ export default function OnlinePlayScreen({
 
   const reportRealtimeActivity = useEffectEvent((message: string) => {
     appendActivity(message);
+  });
+
+  const refreshRoomFromRealtime = useEffectEvent(async (roomIdToRefresh: string) => {
+    try {
+      const { room } = await apiRequest<RoomResponse>(
+        `/api/rooms/${roomIdToRefresh}`,
+      );
+      startTransition(() => {
+        setLiveRoom(room);
+        queryClient.setQueryData<RoomResponse>(["room", room.id], { room });
+      });
+      void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+      reportRealtimeActivity("Room updated live.");
+    } catch (error) {
+      void queryClient.invalidateQueries({ queryKey: ["room", roomIdToRefresh] });
+      void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
+      reportRealtimeActivity(
+        error instanceof Error ? error.message : "Room update will refresh shortly.",
+      );
+    }
   });
 
   const cacheRoom = (room: RoomSummary) => {
@@ -580,9 +600,7 @@ export default function OnlinePlayScreen({
           filter: `id=eq.${currentRoomId}`,
         },
         () => {
-          void queryClient.invalidateQueries({ queryKey: ["room", currentRoomId] });
-          void queryClient.invalidateQueries({ queryKey: ["public-rooms"] });
-          reportRealtimeActivity("Room updated live.");
+          void refreshRoomFromRealtime(currentRoomId);
         },
       )
       .on(
