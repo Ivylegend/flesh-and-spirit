@@ -680,7 +680,7 @@ export default function OnlinePlayScreen({
   if (isRoomRoute) {
     return (
       <div className="min-h-screen bg-amber-50 text-stone-900">
-        <header className="sticky top-0 z-30 border-b border-amber-100 bg-white/95 px-3 py-3 backdrop-blur">
+        <header className="sticky top-0 z-[100] border-b border-amber-100 bg-white/95 px-3 py-3 backdrop-blur">
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
@@ -778,8 +778,8 @@ export default function OnlinePlayScreen({
         ) : activeRoom ? (
           activeRoom.gameStatus === "playing" || activeRoom.gameStatus === "won" ? (
             <main className="grid min-h-[calc(100dvh-64px)] grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_23rem] lg:grid-rows-1">
-              <section className="flex min-h-[55dvh] items-center justify-center overflow-hidden p-2 sm:p-3 lg:min-h-0">
-                <div className="h-full max-h-[calc(100dvh-88px)] w-full max-w-[min(100%,calc((100dvh-88px)*0.72))] sm:max-w-[min(100%,34rem)] lg:max-w-[min(100%,calc((100dvh-88px)*0.72))]">
+              <section className="flex min-h-[55dvh] items-start justify-center overflow-auto p-4 sm:p-5 lg:min-h-0 lg:p-6">
+                <div className="w-full max-w-[min(100%,42rem)] lg:max-w-[min(100%,calc((100dvh-128px)*0.6667))]">
                   <GameBoard
                     players={activePlayers}
                     getDisplayPosition={getOnlineDisplayPosition}

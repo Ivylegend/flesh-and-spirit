@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="28" fill="#facc15"/>
+  <circle cx="64" cy="64" r="48" fill="#fff7ed"/>
+  <image href="/assets/new-holy-spirit.png" x="18" y="18" width="92" height="92" preserveAspectRatio="xMidYMid meet"/>
+</svg>

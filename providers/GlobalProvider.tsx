@@ -9,7 +9,7 @@ const GlobalProvider = ({ children }: { children: React.ReactNode }) => {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <Sonner richColors />
+        <Sonner richColors position="top-center" />
         {children}
       </TooltipProvider>
     </QueryClientProvider>

@@ -44,7 +44,7 @@ export default function LocalGameRoute() {
 
   return (
     <div className="min-h-screen bg-amber-50">
-      <header className="bg-white border-b border-amber-100 px-4 py-3 flex items-center justify-between sticky top-0 z-20">
+      <header className="sticky top-0 z-[100] flex items-center justify-between border-b border-amber-100 bg-white px-4 py-3">
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -60,9 +60,9 @@ export default function LocalGameRoute() {
         <span className="text-xs text-gray-400">Local Play</span>
       </header>
 
-      <div className="flex flex-col lg:flex-row lg:h-[calc(100vh-53px)]">
-        <div className="flex-1 p-3 flex items-start justify-center lg:overflow-auto lg:items-center">
-          <div className="w-full max-w-xs sm:max-w-sm md:max-w-md lg:max-w-lg">
+      <div className="flex flex-col lg:h-[calc(100dvh-53px)] lg:flex-row">
+        <div className="flex flex-1 items-start justify-center overflow-auto p-4 sm:p-5 lg:p-6">
+          <div className="w-full max-w-[min(100%,42rem)] lg:max-w-[min(100%,42rem,calc((100dvh-125px)*0.6667))]">
             <GameBoard
               players={state.players}
               getDisplayPosition={getDisplayPosition}

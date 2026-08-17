@@ -5,6 +5,9 @@ import GlobalProvider from "@/providers/GlobalProvider";
 export const metadata: Metadata = {
   title: "Flesh and Spirit",
   description: "Flesh and Spirit Game",
+  icons: {
+    icon: "/icon.svg",
+  },
 };
 
 export default function RootLayout({

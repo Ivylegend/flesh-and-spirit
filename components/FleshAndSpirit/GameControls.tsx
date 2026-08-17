@@ -3,11 +3,14 @@
 // Dice, player strips, Holy Spirit card picker, event log
 
 import { useState, useEffect, useRef } from "react";
+import Image from "next/image";
+import { toast } from "sonner";
 import {
   Player,
   HolySpiritCard,
   GameEvent,
   TOKEN_COLORS,
+  getHolySpiritCardImage,
 } from "./gameConstants";
 
 // ─── Animated dice ────────────────────────────────────────────────────────────
@@ -93,7 +96,7 @@ function HolySpiritPicker({
 }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-2xl animate-in slide-in-from-bottom-4 duration-200">
+      <div className="w-full max-w-3xl rounded-2xl bg-white p-4 shadow-2xl animate-in slide-in-from-bottom-4 duration-200 sm:p-5">
         <div className="text-center mb-4">
           <div className="text-3xl mb-1">✨</div>
           <h3 className="text-base font-bold text-gray-800">Holy Spirit Tile!</h3>
@@ -102,54 +105,47 @@ function HolySpiritPicker({
           </p>
         </div>
 
-        <div className="space-y-2.5">
-          {cards.map((card) => (
-            <button
-              key={card.id}
-              onClick={() => onUseCard(card.id)}
-              className="
-                w-full flex items-center justify-between
-                px-4 py-3.5 rounded-xl border border-emerald-200
-                bg-emerald-50 hover:bg-emerald-100
-                active:scale-95 transition-all duration-100
-                group
-              "
-            >
-              <div className="text-left">
-                <div className="text-sm font-bold text-emerald-800 group-hover:text-emerald-900">
-                  🕊️ {card.attribute}
-                </div>
-                <div className="text-[10px] text-emerald-500 mt-0.5">Fruit of the Spirit</div>
-              </div>
-              <div className="flex flex-col items-end">
-                <span className="text-xl font-black text-emerald-600">+{card.steps}</span>
-                <span className="text-[9px] text-emerald-400">steps</span>
-              </div>
-            </button>
-          ))}
+        <div className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-2 [scrollbar-width:thin] sm:-mx-5 sm:gap-4 sm:px-5">
+          {cards.map((card) => {
+            const imageSrc = getHolySpiritCardImage(card);
+
+            return (
+              <button
+                key={card.id}
+                onClick={() => onUseCard(card.id)}
+                aria-label={`Use ${card.attribute} card to move forward ${card.steps} steps`}
+                className="
+                  group relative aspect-[1166/1618] w-[72vw] max-w-[230px] shrink-0 snap-center
+                  overflow-hidden rounded-xl border border-emerald-200 bg-emerald-50 shadow-sm
+                  transition-all duration-150 hover:-translate-y-0.5 hover:border-emerald-400 hover:shadow-lg
+                  active:scale-[0.98] sm:w-[220px]
+                "
+              >
+                {imageSrc ? (
+                  <Image
+                    src={imageSrc}
+                    alt={`${card.attribute} Holy Spirit card`}
+                    fill
+                    sizes="(max-width: 640px) 72vw, 230px"
+                    className="object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full flex-col items-center justify-center p-4 text-center">
+                    <div className="text-4xl">🕊️</div>
+                    <div className="mt-2 text-lg font-black text-emerald-800">
+                      {card.attribute}
+                    </div>
+                    <div className="mt-2 text-sm font-semibold text-emerald-600">
+                      Move ahead {card.steps} steps
+                    </div>
+                  </div>
+                )}
+                <span className="pointer-events-none absolute inset-0 rounded-xl ring-0 ring-emerald-400 transition group-hover:ring-4" />
+              </button>
+            );
+          })}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── Event log ────────────────────────────────────────────────────────────────
-
-function EventLog({ event }: { event: GameEvent | null }) {
-  if (!event) return null;
-
-  const styles: Record<string, string> = {
-    sin_triggered:         "bg-orange-50 border-orange-200 text-orange-800",
-    holy_spirit_triggered: "bg-emerald-50 border-emerald-200 text-emerald-800",
-    card_used:             "bg-emerald-50 border-emerald-200 text-emerald-800",
-    won:                   "bg-amber-50 border-amber-300 text-amber-800",
-    moved:                 "bg-gray-50 border-gray-200 text-gray-600",
-    dice_rolled:           "bg-blue-50 border-blue-200 text-blue-700",
-  };
-
-  return (
-    <div className={`text-xs px-3 py-2.5 rounded-xl border leading-relaxed ${styles[event.type] ?? "bg-gray-50 border-gray-200 text-gray-600"}`}>
-      {event.message}
     </div>
   );
 }
@@ -193,6 +189,52 @@ export default function GameControls({
     !isAnimating &&
     gamePhase === "playing" &&
     (canRollOverride ?? true);
+  const lastToastRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!lastEvent) return;
+
+    const eventKey = [
+      lastEvent.type,
+      lastEvent.playerName,
+      lastEvent.message,
+      lastEvent.fromTile ?? "",
+      lastEvent.toTile ?? "",
+    ].join("|");
+
+    if (lastToastRef.current === eventKey) return;
+    lastToastRef.current = eventKey;
+
+    const title: Record<GameEvent["type"], string> = {
+      dice_rolled: "Dice Rolled",
+      moved: "Token Moved",
+      sin_triggered: "Sin Tile",
+      holy_spirit_triggered: "Holy Spirit Tile",
+      card_used: "Card Used",
+      won: "Game Won",
+    };
+
+    const toastOptions = {
+      description: lastEvent.message,
+      duration: lastEvent.type === "won" ? 6000 : 3600,
+    };
+
+    if (lastEvent.type === "sin_triggered") {
+      toast.warning(title[lastEvent.type], toastOptions);
+      return;
+    }
+
+    if (
+      lastEvent.type === "holy_spirit_triggered" ||
+      lastEvent.type === "card_used" ||
+      lastEvent.type === "won"
+    ) {
+      toast.success(title[lastEvent.type], toastOptions);
+      return;
+    }
+
+    toast.info(title[lastEvent.type], toastOptions);
+  }, [lastEvent]);
 
   return (
     <>
@@ -239,9 +281,6 @@ export default function GameControls({
             </div>
           </div>
         )}
-
-        {/* Event log */}
-        <EventLog event={lastEvent} />
 
         {/* Win state */}
         {gamePhase === "won" && (

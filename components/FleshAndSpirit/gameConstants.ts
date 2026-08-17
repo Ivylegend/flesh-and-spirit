@@ -15,6 +15,7 @@ export interface HolySpiritCard {
   id: string;
   attribute: string;
   steps: number;
+  imageSrc?: string;
 }
 
 export interface Player {
@@ -104,19 +105,20 @@ export const TILE_MAP: Record<number, { gridRow: number; gridCol: number }> =
 export interface SinTile {
   name: string;
   returnsTo: number;
+  imageSrc: string;
 }
 
 export const SIN_TILES: Record<number, SinTile> = {
-  4:  { name: "Lying",          returnsTo: 1  },
-  7:  { name: "Cheating",       returnsTo: 6  },
-  9:  { name: "Stealing",       returnsTo: 4  },
-  12: { name: "Disobedience",   returnsTo: 1  },
-  15: { name: "Gluttony",       returnsTo: 11 },
-  20: { name: "Anger",          returnsTo: 8  },
-  22: { name: "Jealousy",       returnsTo: 11 },
-  26: { name: "Fighting",       returnsTo: 14 },
-  30: { name: "Hatred/Murder",  returnsTo: 18 },
-  32: { name: "Lust",           returnsTo: 10 },
+  4:  { name: "Lying",          returnsTo: 1,  imageSrc: "/assets/new-lying.png" },
+  7:  { name: "Cheating",       returnsTo: 6,  imageSrc: "/assets/new-cheating.png" },
+  9:  { name: "Stealing",       returnsTo: 4,  imageSrc: "/assets/new-stealing.png" },
+  12: { name: "Disobedience",   returnsTo: 1,  imageSrc: "/assets/new-disobedience.png" },
+  15: { name: "Gluttony",       returnsTo: 11, imageSrc: "/assets/new-gluttony.png" },
+  20: { name: "Anger",          returnsTo: 8,  imageSrc: "/assets/new-anger.png" },
+  22: { name: "Jealousy",       returnsTo: 11, imageSrc: "/assets/new-jealousy.png" },
+  26: { name: "Fighting",       returnsTo: 14, imageSrc: "/assets/new-fighting.png" },
+  30: { name: "Hatred/Murder",  returnsTo: 18, imageSrc: "/assets/new-hatred.png" },
+  32: { name: "Lust",           returnsTo: 10, imageSrc: "/assets/new-lust.png" },
 };
 
 // Resolve sin chains: tile 9 → tile 4 → tile 1
@@ -150,12 +152,68 @@ export const HOLY_SPIRIT_ATTRIBUTES: { attribute: string; steps: number }[] = [
   { attribute: "Self-control", steps: 12 },
 ];
 
+export const HOLY_SPIRIT_CARD_IMAGES: Record<string, string[]> = {
+  Love: [
+    "/assets/holy-spirit-cards/Love1.jpg",
+    "/assets/holy-spirit-cards/Love2.jpg",
+  ],
+  Joy: [
+    "/assets/holy-spirit-cards/Joy1.jpg",
+    "/assets/holy-spirit-cards/Joy%202.jpg",
+  ],
+  Peace: [
+    "/assets/holy-spirit-cards/Peace1.jpg",
+    "/assets/holy-spirit-cards/Peace2.jpg",
+  ],
+  Patience: [
+    "/assets/holy-spirit-cards/Patient%201.jpg",
+    "/assets/holy-spirit-cards/Patient%202.jpg",
+  ],
+  Kindness: [
+    "/assets/holy-spirit-cards/Kindhearted%201.jpg",
+    "/assets/holy-spirit-cards/Kindhearted%202.jpg",
+  ],
+  Goodness: [
+    "/assets/holy-spirit-cards/Good1.jpg",
+    "/assets/holy-spirit-cards/Good%202.jpg",
+  ],
+  Faithfulness: [
+    "/assets/holy-spirit-cards/Faithful%201.jpg",
+    "/assets/holy-spirit-cards/Faithful%202.jpg",
+  ],
+  Gentleness: [
+    "/assets/holy-spirit-cards/Gentle%201.jpg",
+    "/assets/holy-spirit-cards/Gentle%202.jpg",
+  ],
+  "Self-control": [
+    "/assets/holy-spirit-cards/Self%20Control%201.jpg",
+    "/assets/holy-spirit-cards/Self%20Control%202.jpg",
+  ],
+};
+
+export function getHolySpiritCardImage(card: Pick<HolySpiritCard, "id" | "attribute" | "imageSrc">) {
+  if (card.imageSrc) return card.imageSrc;
+
+  const images = HOLY_SPIRIT_CARD_IMAGES[card.attribute];
+  if (!images?.length) return null;
+
+  const idNumber = Number(card.id.replace(/\D/g, ""));
+  const variantIndex = Number.isFinite(idNumber) ? idNumber % images.length : 0;
+  return images[variantIndex];
+}
+
 export function createDeck(): HolySpiritCard[] {
   const deck: HolySpiritCard[] = [];
   let id = 0;
   for (let copy = 0; copy < 4; copy++) {
     for (const { attribute, steps } of HOLY_SPIRIT_ATTRIBUTES) {
-      deck.push({ id: `card_${id++}`, attribute, steps });
+      const images = HOLY_SPIRIT_CARD_IMAGES[attribute] ?? [];
+      deck.push({
+        id: `card_${id++}`,
+        attribute,
+        steps,
+        imageSrc: images.length ? images[copy % images.length] : undefined,
+      });
     }
   }
   return shuffleDeck(deck);
